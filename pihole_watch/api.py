@@ -9,12 +9,16 @@ DESCRIPTION: Pi-hole HTTP API client. Read-only -- authenticate, fetch
 
 CHANGELOG:
 2026-04-25            Claude      [Feature] Initial implementation.
+2026-04-25            Claude      [Feature] Add fetch_snapshot() that combines
+                                      summary + top blocked + top client into
+                                      a row matching pihole_snapshots schema.
 --------------------------------------------------------------------------------
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -189,6 +193,130 @@ class PiHoleClient:
     def get_summary(self) -> dict:
         """Return /api/stats/summary payload."""
         return self._get("/api/stats/summary")
+
+    def get_top_blocked_domain(self) -> tuple[str | None, int]:
+        """Return (domain, count) of the most-blocked domain, or (None, 0)."""
+        payload = self._get(
+            "/api/stats/top_domains", {"blocked": "true", "count": 1}
+        )
+        items = payload.get("domains") or payload.get("top_domains") or []
+        if not items:
+            return None, 0
+        first = items[0]
+        domain = first.get("domain") if isinstance(first, dict) else None
+        count = first.get("count") if isinstance(first, dict) else 0
+        try:
+            count = int(count or 0)
+        except (TypeError, ValueError):
+            count = 0
+        return (domain if isinstance(domain, str) else None), count
+
+    def get_top_querying_client(self) -> tuple[str | None, int]:
+        """Return (label, count) of the most active client, or (None, 0).
+
+        Label preference: name > ip. Pi-hole returns either ``clients`` or
+        ``top_sources``-style payloads depending on version, so accept both.
+        """
+        payload = self._get("/api/stats/top_clients", {"count": 1})
+        items = payload.get("clients") or payload.get("top_sources") or []
+        if not items:
+            return None, 0
+        first = items[0]
+        if not isinstance(first, dict):
+            return None, 0
+        label = first.get("name") or first.get("ip")
+        count = first.get("count", 0)
+        try:
+            count = int(count or 0)
+        except (TypeError, ValueError):
+            count = 0
+        return (label if isinstance(label, str) else None), count
+
+    def fetch_snapshot(self) -> dict:
+        """Combine summary + top_domains + top_clients into a snapshot dict.
+
+        Returns a dict matching the ``pihole_snapshots`` table schema. Caller
+        passes this to ``findings.record_snapshot()``. Tolerant of varying
+        Pi-hole API shapes — defaults to 0 / None for missing fields.
+        """
+        summary = self.get_summary()
+        # Pi-hole v6 puts metrics under "queries" sub-object; fall back to
+        # top-level keys for older versions.
+        q = summary.get("queries") if isinstance(summary, dict) else None
+        if not isinstance(q, dict):
+            q = summary if isinstance(summary, dict) else {}
+
+        def _i(*keys: str) -> int:
+            for k in keys:
+                v = q.get(k)
+                if v is None and isinstance(summary, dict):
+                    v = summary.get(k)
+                if isinstance(v, (int, float)):
+                    return int(v)
+                if isinstance(v, str) and v.replace(".", "", 1).isdigit():
+                    return int(float(v))
+            return 0
+
+        total = _i("total", "dns_queries_today")
+        blocked = _i("blocked", "ads_blocked_today")
+        cached = _i("cached", "queries_cached")
+        forwarded = _i("forwarded", "queries_forwarded")
+        unique_domains = _i("unique_domains")
+
+        # block / cache rate may be present pre-computed; fall back to compute.
+        block_rate = q.get("percent_blocked")
+        if block_rate is None and isinstance(summary, dict):
+            block_rate = summary.get("ads_percentage_today")
+        if not isinstance(block_rate, (int, float)):
+            block_rate = (blocked / total * 100.0) if total > 0 else 0.0
+
+        cache_rate = q.get("cache_hit_rate")
+        if not isinstance(cache_rate, (int, float)):
+            cache_rate = (cached / total * 100.0) if total > 0 else 0.0
+
+        # active clients
+        clients_obj = (
+            summary.get("clients") if isinstance(summary, dict) else None
+        )
+        if isinstance(clients_obj, dict):
+            active_clients = int(clients_obj.get("active") or 0)
+        else:
+            active_clients = _i("clients_ever_seen", "unique_clients")
+
+        gravity = summary.get("gravity") if isinstance(summary, dict) else None
+        if isinstance(gravity, dict):
+            gravity_domains = int(gravity.get("domains_being_blocked") or 0)
+        else:
+            gravity_domains = _i(
+                "domains_being_blocked", "gravity_domains_blocked"
+            )
+
+        try:
+            top_blocked_domain, _ = self.get_top_blocked_domain()
+        except PiHoleAPIError as exc:
+            log.warning("top_blocked_domain fetch failed: %s", exc)
+            top_blocked_domain = None
+        try:
+            top_querying_client, _ = self.get_top_querying_client()
+        except PiHoleAPIError as exc:
+            log.warning("top_querying_client fetch failed: %s", exc)
+            top_querying_client = None
+
+        snapshot_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return {
+            "snapshot_at": snapshot_at,
+            "total_queries": int(total),
+            "blocked_queries": int(blocked),
+            "cached_queries": int(cached),
+            "forwarded_queries": int(forwarded),
+            "block_rate_pct": float(block_rate),
+            "cache_hit_rate_pct": float(cache_rate),
+            "active_clients": int(active_clients),
+            "unique_domains": int(unique_domains),
+            "gravity_domains": int(gravity_domains),
+            "top_blocked_domain": top_blocked_domain,
+            "top_querying_client": top_querying_client,
+        }
 
 
 __all__ = ["PiHoleAPIError", "PiHoleClient"]

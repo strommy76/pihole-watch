@@ -112,3 +112,105 @@ sqlite3 findings.db "SELECT detected_at, finding_type, client_ip, domain,
 
 See `.env.example`. All key names start with `WATCH_` except for
 `PIHOLE_URL`, `PIHOLE_PASSWORD`, `LOG_PATH`.
+
+## Telemetry & Reports
+
+In addition to anomaly findings, each run also captures a Pi-hole
+**snapshot** — a row in the `pihole_snapshots` table with overall stats
+(total / blocked / cached / forwarded queries, block rate, cache hit
+rate, active clients, gravity domain count, top blocked domain, top
+querying client). This builds a 5-minute-granular timeline of Pi-hole's
+own metrics that's much easier to reason about than scraping the Pi-hole
+UI charts.
+
+Findings now have a **triage lifecycle**. Each row gets `triage_outcome`
+(default `pending`) plus optional `triaged_at` and `triage_note`. Valid
+outcomes:
+
+- `confirmed` — real threat
+- `false_positive` — not a threat (informs precision)
+- `ignored` — known-noisy / known-benign, suppress without judging
+- `pending` — not yet reviewed
+
+The `weekly-report` CLI command emits a markdown summary covering
+Pi-hole metrics drift, finding totals, triage status, per-detector
+precision, and noisy clients — useful for dropping into a weekly
+journal.
+
+## CLI
+
+```bash
+PYTHONPATH=/home/pistrommy/projects \
+  /home/pistrommy/.virtualenvs/pimoroni/bin/python -m pihole_watch.cli <command>
+```
+
+Commands:
+
+| Command | Purpose |
+| --- | --- |
+| `list [--limit N] [--outcome O] [--type T]` | Print the latest findings, optionally filtered by triage outcome or finding type. |
+| `triage FINDING_ID --outcome O [--note "..."]` | Stamp a finding with `confirmed`/`false_positive`/`ignored`/`pending`. |
+| `summary [--since YYYY-MM-DD]` | Per-detector triage rollup with precision %. Also prints latest Pi-hole snapshot. |
+| `weekly-report` | Markdown summary of the last 7 days. |
+
+Examples:
+
+```bash
+# Last 20 pending DGA findings
+... -m pihole_watch.cli list --type dga --outcome pending --limit 20
+
+# Mark a finding as a false positive with a note
+... -m pihole_watch.cli triage 42 --outcome false_positive --note "CDN edge name"
+
+# Weekly markdown report
+... -m pihole_watch.cli weekly-report > /tmp/pihole-watch-week.md
+```
+
+## Grafana setup
+
+The `grafana/pihole-watch.json` dashboard visualizes everything: snapshot
+timeline, findings, triage status, detector run health.
+
+It uses `frser-sqlite-datasource` and assumes a datasource UID of
+`pihole-watch-sqlite-ds` pointing at this repo's `findings.db`. To wire
+it up:
+
+1. **Datasource provisioning.** Add a new entry under your Grafana
+   container's `datasources/` provisioning directory (e.g.,
+   `~/grafana-data/datasources/pihole-watch.yml`):
+
+   ```yaml
+   apiVersion: 1
+   datasources:
+     - name: pihole-watch SQLite
+       type: frser-sqlite-datasource
+       uid: pihole-watch-sqlite-ds
+       jsonData:
+         path: /var/lib/pihole-watch/findings.db
+   ```
+
+   The path inside the container must match wherever you mount
+   `findings.db`.
+
+2. **Volume mount.** The Grafana container needs read access to
+   `findings.db`. Add a mount in your `docker-compose.yml` (read-only
+   is fine — Grafana never writes here):
+
+   ```yaml
+   services:
+     grafana:
+       volumes:
+         - /home/pistrommy/projects/pihole-watch:/var/lib/pihole-watch:ro
+   ```
+
+   SQLite WAL mode also writes `findings.db-wal` / `findings.db-shm`
+   alongside; mounting the whole directory is the simplest approach.
+
+3. **Dashboard provisioning.** Drop `grafana/pihole-watch.json` into
+   your dashboards provisioning directory (e.g.,
+   `~/grafana-data/dashboards/pihole-watch.json`).
+
+4. **Reload.** `docker compose restart grafana` (or just hit the Grafana
+   reload-provisioning endpoint).
+
+The dashboard refreshes every 5 minutes — same cadence as the watcher.

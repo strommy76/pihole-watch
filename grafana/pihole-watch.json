@@ -1,0 +1,378 @@
+{
+  "_meta": {
+    "path": "~/projects/pihole-watch/grafana/pihole-watch.json",
+    "description": "pihole-watch — Pi-hole telemetry timeline + ML threat findings + triage lifecycle. SQLite-backed via frser-sqlite-datasource (uid pihole-watch-sqlite-ds).",
+    "changelog": [
+      "2026-04-25 — Initial creation: 13 panels covering snapshot timeline, findings, triage, run health"
+    ]
+  },
+  "uid": "pihole-watch-dash",
+  "title": "pihole-watch — Threat Findings & Pi-hole Timeline",
+  "tags": ["pihole", "security", "watch"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": {"from": "now-7d", "to": "now"},
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "title": "Pi-hole timeline",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Block rate trend",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 1},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {"mode": "palette-classic"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "time series",
+          "rawQueryText": "SELECT CAST(strftime('%s', snapshot_at) AS INTEGER) AS time, block_rate_pct AS \"Block rate %\" FROM pihole_snapshots ORDER BY snapshot_at",
+          "timeColumns": ["time"],
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Daily query volume",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 9},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "time series",
+          "rawQueryText": "SELECT CAST(strftime('%s', snapshot_at) AS INTEGER) AS time, total_queries AS \"Total\", cached_queries AS \"Cached\", forwarded_queries AS \"Forwarded\", blocked_queries AS \"Blocked\" FROM pihole_snapshots ORDER BY snapshot_at",
+          "timeColumns": ["time"],
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "gauge",
+      "title": "Cache hit rate (latest)",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 15},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 25},
+              {"color": "green", "value": 60}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "SELECT cache_hit_rate_pct AS value FROM pihole_snapshots ORDER BY snapshot_at DESC LIMIT 1",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Active clients (latest)",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 15},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "blue", "value": null}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "SELECT active_clients AS value FROM pihole_snapshots ORDER BY snapshot_at DESC LIMIT 1",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Gravity domains in blocklist",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 15},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "purple", "value": null}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "SELECT gravity_domains AS value FROM pihole_snapshots ORDER BY snapshot_at DESC LIMIT 1",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Findings",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21},
+      "collapsed": false
+    },
+    {
+      "type": "barchart",
+      "title": "Findings per day (by type)",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 22},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {
+        "stacking": "normal",
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "xField": "date"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "SELECT date(detected_at) AS date, finding_type, COUNT(*) AS count FROM findings WHERE detected_at >= date('now', '-30 days') GROUP BY date(detected_at), finding_type ORDER BY date",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Recent findings (last 50)",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 30},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "left", "filterable": true}},
+        "overrides": []
+      },
+      "options": {"showHeader": true},
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "SELECT detected_at, finding_type, severity, client_ip, domain, ROUND(score, 3) AS score, COALESCE(triage_outcome,'pending') AS triage_outcome, triage_note FROM findings ORDER BY id DESC LIMIT 50",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Triage status by detector",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 40},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "left"}},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "Precision %"},
+            "properties": [{"id": "unit", "value": "percent"}]
+          }
+        ]
+      },
+      "options": {"showHeader": true},
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "SELECT finding_type AS Detector, SUM(CASE WHEN COALESCE(triage_outcome,'pending')='confirmed' THEN 1 ELSE 0 END) AS Confirmed, SUM(CASE WHEN COALESCE(triage_outcome,'pending')='false_positive' THEN 1 ELSE 0 END) AS \"False Positive\", SUM(CASE WHEN COALESCE(triage_outcome,'pending')='ignored' THEN 1 ELSE 0 END) AS Ignored, SUM(CASE WHEN COALESCE(triage_outcome,'pending')='pending' THEN 1 ELSE 0 END) AS Pending, CAST(SUM(CASE WHEN COALESCE(triage_outcome,'pending')='confirmed' THEN 1 ELSE 0 END) AS REAL) / NULLIF(SUM(CASE WHEN COALESCE(triage_outcome,'pending') IN ('confirmed','false_positive') THEN 1 ELSE 0 END), 0) * 100 AS \"Precision %\" FROM findings GROUP BY finding_type",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Top noisy clients (last 7 days)",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 48},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "left"}},
+        "overrides": []
+      },
+      "options": {"showHeader": true},
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "SELECT client_ip AS Client, COUNT(*) AS Findings, SUM(CASE WHEN finding_type='dga' THEN 1 ELSE 0 END) AS DGA, SUM(CASE WHEN finding_type='nxdomain_spike' THEN 1 ELSE 0 END) AS NX, SUM(CASE WHEN finding_type='volume_anomaly' THEN 1 ELSE 0 END) AS Volume, SUM(CASE WHEN finding_type='beacon' THEN 1 ELSE 0 END) AS Beacon FROM findings WHERE detected_at >= datetime('now', '-7 days') GROUP BY client_ip ORDER BY Findings DESC LIMIT 20",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Most flagged domains (last 7 days)",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 48},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "left"}},
+        "overrides": []
+      },
+      "options": {"showHeader": true},
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "SELECT domain AS Domain, COUNT(*) AS Findings, GROUP_CONCAT(DISTINCT finding_type) AS Types, MAX(severity) AS \"Max Severity\" FROM findings WHERE detected_at >= datetime('now', '-7 days') AND domain IS NOT NULL GROUP BY domain ORDER BY Findings DESC LIMIT 20",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Run health",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 56},
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Detector latency (elapsed_ms per run)",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 57},
+      "fieldConfig": {
+        "defaults": {"unit": "ms", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "time series",
+          "rawQueryText": "SELECT CAST(strftime('%s', run_at) AS INTEGER) AS time, elapsed_ms AS \"Elapsed ms\" FROM run_log ORDER BY run_at",
+          "timeColumns": ["time"],
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Run success rate (last 24h)",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 4, "w": 12, "x": 0, "y": 63},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 90},
+              {"color": "green", "value": 99}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "graphMode": "none",
+        "colorMode": "background",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "SELECT CAST(SUM(CASE WHEN error IS NULL THEN 1 ELSE 0 END) AS REAL) / NULLIF(COUNT(*), 0) * 100 AS value FROM run_log WHERE run_at >= datetime('now', '-1 day')",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Findings precision over time (weekly bins)",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 4, "w": 12, "x": 12, "y": 63},
+      "fieldConfig": {
+        "defaults": {"unit": "percent", "min": 0, "max": 100, "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "time series",
+          "rawQueryText": "SELECT CAST(strftime('%s', date(detected_at, 'weekday 0', '-6 days')) AS INTEGER) AS time, finding_type, CAST(SUM(CASE WHEN triage_outcome='confirmed' THEN 1 ELSE 0 END) AS REAL) / NULLIF(SUM(CASE WHEN triage_outcome IN ('confirmed','false_positive') THEN 1 ELSE 0 END), 0) * 100 AS precision_pct FROM findings GROUP BY date(detected_at, 'weekday 0', '-6 days'), finding_type ORDER BY time",
+          "timeColumns": ["time"],
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    }
+  ]
+}

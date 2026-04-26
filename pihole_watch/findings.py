@@ -3,10 +3,14 @@
 FILE:        findings.py
 PATH:        ~/projects/pihole-watch/pihole_watch/findings.py
 DESCRIPTION: SQLite findings store. Schema init, DAO functions for findings,
-             baselines, and run_log.
+             baselines, run_log, pihole_snapshots, and finding triage.
 
 CHANGELOG:
 2026-04-25            Claude      [Feature] Initial implementation.
+2026-04-25            Claude      [Feature] Add pihole_snapshots timeline
+                                      table, triage columns on findings, and
+                                      additive _apply_migrations(). Idempotent
+                                      and safe on existing DBs.
 --------------------------------------------------------------------------------
 """
 
@@ -19,6 +23,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+_VALID_TRIAGE_OUTCOMES: frozenset[str] = frozenset(
+    {"confirmed", "false_positive", "ignored", "pending"}
+)
 
 
 _SCHEMA = """
@@ -51,6 +60,22 @@ CREATE TABLE IF NOT EXISTS run_log (
     elapsed_ms INTEGER NOT NULL,
     error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS pihole_snapshots (
+    snapshot_at TEXT PRIMARY KEY,
+    total_queries INTEGER NOT NULL,
+    blocked_queries INTEGER NOT NULL,
+    cached_queries INTEGER NOT NULL,
+    forwarded_queries INTEGER NOT NULL,
+    block_rate_pct REAL NOT NULL,
+    cache_hit_rate_pct REAL NOT NULL,
+    active_clients INTEGER NOT NULL,
+    unique_domains INTEGER NOT NULL,
+    gravity_domains INTEGER NOT NULL,
+    top_blocked_domain TEXT,
+    top_querying_client TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_at ON pihole_snapshots(snapshot_at);
 """
 
 
@@ -65,9 +90,41 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Apply the schema (idempotent)."""
+    """Apply the schema (idempotent) plus additive migrations."""
     conn.executescript(_SCHEMA)
+    _apply_migrations(conn)
     conn.commit()
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {r["name"] for r in rows}
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Additive-only migrations. Existing rows are preserved.
+
+    Each migration checks whether its target column/table already exists
+    before applying. SQLite ALTER cannot easily add CHECK constraints, so
+    enforcement of `triage_outcome` values lives in DAO functions, not the
+    DB layer.
+    """
+    # Migration: add triage columns to `findings`.
+    findings_cols = _table_columns(conn, "findings")
+    if "triaged_at" not in findings_cols:
+        conn.execute("ALTER TABLE findings ADD COLUMN triaged_at TEXT")
+    if "triage_outcome" not in findings_cols:
+        conn.execute(
+            "ALTER TABLE findings ADD COLUMN triage_outcome TEXT DEFAULT 'pending'"
+        )
+        # Backfill any pre-existing rows that the DEFAULT didn't touch
+        # (SQLite applies DEFAULT only to columns added via ALTER for
+        # subsequent inserts; existing rows get NULL unless we update).
+        conn.execute(
+            "UPDATE findings SET triage_outcome='pending' WHERE triage_outcome IS NULL"
+        )
+    if "triage_note" not in findings_cols:
+        conn.execute("ALTER TABLE findings ADD COLUMN triage_note TEXT")
 
 
 # -- findings ----------------------------------------------------------------
@@ -85,14 +142,14 @@ def record_finding(
     sample_queries: list[int] | None = None,
     detected_at: str | None = None,
 ) -> int:
-    """Insert a finding. Returns its row id."""
+    """Insert a finding. Returns its row id. Default triage_outcome='pending'."""
     if detected_at is None:
         detected_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     cur = conn.execute(
         """INSERT INTO findings
            (detected_at, finding_type, severity, client_ip, domain, score,
-            details, sample_queries)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            details, sample_queries, triage_outcome)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
         (
             detected_at,
             finding_type,
@@ -119,6 +176,101 @@ def list_findings_since(
             (since_iso,),
         )
     )
+
+
+# -- triage ------------------------------------------------------------------
+
+
+def triage_finding(
+    conn: sqlite3.Connection,
+    finding_id: int,
+    outcome: str,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Mark a finding with a triage outcome. Returns the updated row as dict.
+
+    Raises:
+        ValueError: outcome not in the valid set or finding_id not found.
+    """
+    if outcome not in _VALID_TRIAGE_OUTCOMES:
+        raise ValueError(
+            f"triage outcome {outcome!r} not in {sorted(_VALID_TRIAGE_OUTCOMES)}"
+        )
+    triaged_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    cur = conn.execute(
+        """UPDATE findings
+           SET triaged_at = ?, triage_outcome = ?, triage_note = ?
+           WHERE id = ?""",
+        (triaged_at, outcome, note, int(finding_id)),
+    )
+    if cur.rowcount == 0:
+        raise ValueError(f"finding id {finding_id} not found")
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM findings WHERE id = ?", (int(finding_id),)
+    ).fetchone()
+    return dict(row) if row is not None else {}
+
+
+def findings_by_outcome(
+    conn: sqlite3.Connection,
+    outcome: str | None = None,
+    since_iso: str | None = None,
+) -> list[dict[str, Any]]:
+    """Filter findings by triage outcome and optional since cutoff."""
+    where: list[str] = []
+    params: list[Any] = []
+    if outcome is not None:
+        if outcome not in _VALID_TRIAGE_OUTCOMES:
+            raise ValueError(
+                f"outcome {outcome!r} not in {sorted(_VALID_TRIAGE_OUTCOMES)}"
+            )
+        where.append("triage_outcome = ?")
+        params.append(outcome)
+    if since_iso is not None:
+        where.append("detected_at >= ?")
+        params.append(since_iso)
+    sql = "SELECT * FROM findings"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY detected_at DESC, id DESC"
+    return [dict(r) for r in conn.execute(sql, params)]
+
+
+def triage_summary(
+    conn: sqlite3.Connection, since_iso: str | None = None
+) -> dict[str, dict[str, int]]:
+    """Per-detector counts grouped by triage outcome.
+
+    Returns a dict like
+        {'dga': {'confirmed': 6, 'false_positive': 24, 'ignored': 5,
+                 'pending': 7}, ...}
+
+    Detectors with zero findings are omitted.
+    """
+    sql = (
+        "SELECT finding_type, COALESCE(triage_outcome, 'pending') AS outcome, "
+        "COUNT(*) AS n FROM findings"
+    )
+    params: list[Any] = []
+    if since_iso is not None:
+        sql += " WHERE detected_at >= ?"
+        params.append(since_iso)
+    sql += " GROUP BY finding_type, outcome"
+    out: dict[str, dict[str, int]] = {}
+    for row in conn.execute(sql, params):
+        ftype = row["finding_type"]
+        outcome = row["outcome"]
+        bucket = out.setdefault(
+            ftype,
+            {"confirmed": 0, "false_positive": 0, "ignored": 0, "pending": 0},
+        )
+        if outcome in bucket:
+            bucket[outcome] = int(row["n"])
+        else:
+            # Unknown outcome (e.g., manual DB mutation) — keep as pending.
+            bucket["pending"] += int(row["n"])
+    return out
 
 
 # -- baselines ---------------------------------------------------------------
@@ -212,14 +364,81 @@ def last_successful_run(conn: sqlite3.Connection) -> str | None:
     return row["run_at"] if row else None
 
 
+# -- pihole_snapshots --------------------------------------------------------
+
+
+_SNAPSHOT_COLS: tuple[str, ...] = (
+    "snapshot_at",
+    "total_queries",
+    "blocked_queries",
+    "cached_queries",
+    "forwarded_queries",
+    "block_rate_pct",
+    "cache_hit_rate_pct",
+    "active_clients",
+    "unique_domains",
+    "gravity_domains",
+    "top_blocked_domain",
+    "top_querying_client",
+)
+
+
+def record_snapshot(
+    conn: sqlite3.Connection, snapshot: dict[str, Any]
+) -> None:
+    """Insert a Pi-hole timeline snapshot. Idempotent on duplicate
+    snapshot_at via OR REPLACE.
+
+    Caller supplies ``snapshot`` matching the ``pihole_snapshots`` schema.
+    Missing keys raise KeyError so we fail loud on malformed input.
+    """
+    values = tuple(snapshot[c] for c in _SNAPSHOT_COLS)
+    placeholders = ",".join("?" for _ in _SNAPSHOT_COLS)
+    cols_csv = ",".join(_SNAPSHOT_COLS)
+    conn.execute(
+        f"INSERT OR REPLACE INTO pihole_snapshots ({cols_csv}) "
+        f"VALUES ({placeholders})",
+        values,
+    )
+    conn.commit()
+
+
+def latest_snapshot(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """Return most recent snapshot row as dict or None."""
+    row = conn.execute(
+        "SELECT * FROM pihole_snapshots ORDER BY snapshot_at DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def snapshots_since(
+    conn: sqlite3.Connection, since_iso: str
+) -> list[dict[str, Any]]:
+    """Return all snapshots with snapshot_at >= since_iso, oldest first."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM pihole_snapshots WHERE snapshot_at >= ? "
+            "ORDER BY snapshot_at ASC",
+            (since_iso,),
+        )
+    ]
+
+
 __all__ = [
     "connect",
     "init_schema",
     "record_finding",
     "list_findings_since",
+    "triage_finding",
+    "findings_by_outcome",
+    "triage_summary",
     "get_baseline",
     "all_baseline_qps",
     "set_baseline",
     "record_run",
     "last_successful_run",
+    "record_snapshot",
+    "latest_snapshot",
+    "snapshots_since",
 ]

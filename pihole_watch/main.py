@@ -9,6 +9,9 @@ DESCRIPTION: pihole-watch entry point. Run as a systemd oneshot every 5 min:
 
 CHANGELOG:
 2026-04-25            Claude      [Feature] Initial implementation.
+2026-04-25            Claude      [Feature] Capture pihole_snapshots row on
+                                      every run (best-effort, doesn't fail
+                                      the run on snapshot error).
 --------------------------------------------------------------------------------
 """
 
@@ -101,6 +104,19 @@ def main() -> int:
 
         client = PiHoleClient(cfg.pihole_url, cfg.pihole_password)
         client.authenticate()
+
+        # Capture a snapshot of Pi-hole's overall metrics (best-effort —
+        # any failure is logged but does not fail the run).
+        try:
+            snapshot = client.fetch_snapshot()
+            findings_db.record_snapshot(conn, snapshot)
+            logger.info(
+                "snapshot recorded: total=%d blocked=%d block_rate=%.2f%%",
+                snapshot["total_queries"], snapshot["blocked_queries"],
+                snapshot["block_rate_pct"],
+            )
+        except Exception as exc:  # noqa: BLE001 -- snapshot is best-effort
+            logger.warning("failed to record pihole snapshot: %s", exc)
 
         # Fetch the longer beacon window once and slice short window from it,
         # avoiding two round-trips against the same dataset.
