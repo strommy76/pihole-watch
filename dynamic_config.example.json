@@ -1,0 +1,15 @@
+{
+  "_meta": {
+    "schema_version": 1,
+    "description": "pihole-watch tuning. Edit by hand for manual A/B; weekly calibrator overwrites the threshold fields. Detection picks up changes on the next 5-min cycle.",
+    "ssot": "this file is the SSOT for current tuning values. calibration_history (in findings.db) is the audit trail.",
+    "last_calibrated_at": null
+  },
+  "lookback_minutes": 6,
+  "beacon_lookback_minutes": 60,
+  "beacon_min_occurrences": 6,
+  "dga_threshold": 0.65,
+  "nxdomain_rate_threshold": 0.30,
+  "beacon_max_interval_cv": 0.15,
+  "volume_sigma_threshold": 3.0
+}

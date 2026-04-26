@@ -40,7 +40,6 @@ def test_schema_creates_expected_tables(db) -> None:
     names = [r["name"] for r in rows]
     assert names == [
         "baselines",
-        "calibration",
         "calibration_history",
         "findings",
         "pihole_snapshots",

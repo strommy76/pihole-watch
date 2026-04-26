@@ -12,6 +12,11 @@ DESCRIPTION: Autonomous threshold calibration for pihole-watch detectors.
 
 CHANGELOG:
 2026-04-26            Claude      [Feature] Initial implementation.
+2026-04-26            Claude      [Refactor] Write current-values to
+                                      dynamic_config.json (atomic) instead of
+                                      a calibration table; append one
+                                      audit row per parameter to
+                                      calibration_history.
 --------------------------------------------------------------------------------
 """
 
@@ -23,10 +28,12 @@ import sqlite3
 import statistics
 import string
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
 from pihole_watch import findings as findings_db
 from pihole_watch.beacon import _coef_of_variation
+from pihole_watch.config import load_dynamic_config, write_dynamic_config
 from pihole_watch.dga import dga_score
 
 log = logging.getLogger(__name__)
@@ -665,6 +672,18 @@ def _percentile(values: Iterable[float], pct: float) -> float:
 # ---------------------------------------------------------------------------
 
 
+# Map calibration result `parameter` name -> dynamic_config.json key.
+# The two diverge on beacon: the calibration result names it
+# `beacon_cv_threshold`, but the runtime config field is
+# `beacon_max_interval_cv` (the actual parameter the detector uses).
+_PARAM_TO_CONFIG_KEY: dict[str, str] = {
+    "dga_threshold": "dga_threshold",
+    "nxdomain_rate_threshold": "nxdomain_rate_threshold",
+    "beacon_cv_threshold": "beacon_max_interval_cv",
+    "volume_sigma_threshold": "volume_sigma_threshold",
+}
+
+
 def calibrate_all(
     pihole_client: Any,
     findings_conn: sqlite3.Connection,
@@ -673,94 +692,71 @@ def calibrate_all(
     n_synthetic_dga: int = 2000,
     target_fpr: float = 0.02,
     beacon_lookback_hours: int = 24,
+    dynamic_config_path: str | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Run every calibration and persist results to the calibration table.
+    """Run every calibration, atomic-write dynamic_config.json, append history.
 
-    Returns ``{parameter: result_dict}``. Each result is also written to
-    the ``calibration`` table (with history) before being returned.
+    Threshold values move to dynamic_config.json (the SSOT for current
+    tuning). Each parameter also gets a row in ``calibration_history`` so
+    the evolution can be graphed.
+
+    Returns ``{parameter: result_dict}``.
     """
     results: dict[str, dict[str, Any]] = {}
 
     log.info("calibrating dga_threshold (lookback=%d days)", lookback_days)
-    dga_res = calibrate_dga_threshold(
+    results["dga_threshold"] = calibrate_dga_threshold(
         pihole_client,
         findings_conn,
         lookback_days=lookback_days,
         n_synthetic_dga=n_synthetic_dga,
         target_fpr=target_fpr,
     )
-    findings_db.set_calibration(
-        findings_conn,
-        parameter=dga_res["parameter"],
-        value=dga_res["optimal_value"],
-        method=dga_res["method"],
-        metrics=dga_res["metrics"],
-        details=_strip_curve_for_storage(dga_res["details"]),
-    )
-    results[dga_res["parameter"]] = dga_res
 
     log.info("calibrating nxdomain_rate_threshold")
-    nx_res = calibrate_nxdomain_rate_threshold(
+    results["nxdomain_rate_threshold"] = calibrate_nxdomain_rate_threshold(
         findings_conn, lookback_days=lookback_days
     )
-    findings_db.set_calibration(
-        findings_conn,
-        parameter=nx_res["parameter"],
-        value=nx_res["optimal_value"],
-        method=nx_res["method"],
-        metrics=nx_res["metrics"],
-        details=nx_res["details"],
-    )
-    results[nx_res["parameter"]] = nx_res
 
     log.info("calibrating beacon_cv_threshold")
-    beacon_res = calibrate_beacon_cv_threshold(
+    results["beacon_cv_threshold"] = calibrate_beacon_cv_threshold(
         pihole_client, lookback_hours=beacon_lookback_hours
     )
-    findings_db.set_calibration(
-        findings_conn,
-        parameter=beacon_res["parameter"],
-        value=beacon_res["optimal_value"],
-        method=beacon_res["method"],
-        metrics=beacon_res["metrics"],
-        details=beacon_res["details"],
-    )
-    results[beacon_res["parameter"]] = beacon_res
 
     log.info("calibrating volume_sigma_threshold")
-    vol_res = calibrate_volume_sigma_threshold(
+    results["volume_sigma_threshold"] = calibrate_volume_sigma_threshold(
         findings_conn, lookback_days=lookback_days
     )
-    findings_db.set_calibration(
-        findings_conn,
-        parameter=vol_res["parameter"],
-        value=vol_res["optimal_value"],
-        method=vol_res["method"],
-        metrics=vol_res["metrics"],
-        details=vol_res["details"],
+
+    # ----- persist: read prior values, write JSON, append history -----------
+    prior = load_dynamic_config(dynamic_config_path)
+    calibrated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    updates: dict[str, Any] = {}
+    for param_name, res in results.items():
+        config_key = _PARAM_TO_CONFIG_KEY[param_name]
+        new_value = float(res["optimal_value"])
+        old_value = float(prior[config_key]) if config_key in prior else None
+        updates[config_key] = new_value
+
+        findings_db.record_calibration_event(
+            findings_conn,
+            parameter=param_name,
+            new_value=new_value,
+            old_value=old_value,
+            method=str(res["method"]),
+            metrics=res.get("metrics"),
+            calibrated_at=calibrated_at,
+        )
+
+    write_dynamic_config(
+        updates,
+        path=dynamic_config_path,
+        last_calibrated_at=calibrated_at,
     )
-    results[vol_res["parameter"]] = vol_res
+    log.info("dynamic_config.json updated; %d history rows appended", len(updates))
 
     return results
-
-
-def _strip_curve_for_storage(details: dict[str, Any]) -> dict[str, Any]:
-    """Trim the full ROC curve before storing it in calibration.details_json.
-
-    Storing all 66 ROC points per calibration adds up. Keep a sparse
-    sub-sample plus the head/tail so we still see curve shape in disk-side
-    diagnostics. Top FP / top TP lists are preserved as-is.
-    """
-    out = dict(details)
-    curve = out.get("fpr_curve")
-    if isinstance(curve, list) and len(curve) > 16:
-        # Keep every 5th point plus the endpoints
-        keep_idx = set(range(0, len(curve), 5))
-        keep_idx.add(0)
-        keep_idx.add(len(curve) - 1)
-        out["fpr_curve_sparse"] = [curve[i] for i in sorted(keep_idx)]
-        del out["fpr_curve"]
-    return out
 
 
 __all__ = [

@@ -383,63 +383,60 @@ def test_calibrate_volume_sigma_no_history(db) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Persistence + history
+# Calibration history (audit table)
 # ---------------------------------------------------------------------------
 
 
-def test_set_calibration_persists_and_history(db) -> None:
-    out = findings_db.set_calibration(
+def test_record_calibration_event_appends_history(db) -> None:
+    rid1 = findings_db.record_calibration_event(
         db,
         parameter="dga_threshold",
-        value=0.72,
+        new_value=0.72,
         method="roc_optimal",
+        old_value=None,
         metrics={"auroc": 0.95},
-        details={"negative_corpus_size": 1234},
     )
-    assert out["parameter"] == "dga_threshold"
-    assert out["value"] == 0.72
-    assert out["metrics"]["auroc"] == 0.95
-    # Update again -> history grows, live row updated.
-    out2 = findings_db.set_calibration(
+    rid2 = findings_db.record_calibration_event(
         db,
         parameter="dga_threshold",
-        value=0.68,
+        new_value=0.68,
         method="roc_optimal",
+        old_value=0.72,
         metrics={"auroc": 0.96},
     )
-    assert out2["value"] == 0.68
+    assert rid2 > rid1
     history = findings_db.calibration_history(db, parameter="dga_threshold")
     assert len(history) == 2
     # newest first
     assert history[0]["new_value"] == 0.68
     assert history[0]["old_value"] == 0.72
+    assert history[0]["metrics"] == {"auroc": 0.96}
     assert history[1]["new_value"] == 0.72
     assert history[1]["old_value"] is None
 
 
-def test_get_calibration_missing_returns_none(db) -> None:
-    assert findings_db.get_calibration(db, "nope") is None
-
-
-def test_get_all_calibrations(db) -> None:
-    findings_db.set_calibration(
-        db, parameter="a", value=0.5, method="manual",
-    )
-    findings_db.set_calibration(
-        db, parameter="b", value=0.25, method="percentile",
-    )
-    out = findings_db.get_all_calibrations(db)
-    assert set(out) == {"a", "b"}
-    assert out["a"]["value"] == 0.5
-    assert out["b"]["value"] == 0.25
-
-
 # ---------------------------------------------------------------------------
-# Orchestrator
+# Orchestrator (writes JSON + history)
 # ---------------------------------------------------------------------------
 
 
-def test_calibrate_all_writes_every_parameter(db) -> None:
+def _seed_dynamic_config(path: str) -> None:
+    """Drop a minimal dynamic_config.json into ``path`` for the orchestrator."""
+    import json as _json
+    with open(path, "w", encoding="utf-8") as fh:
+        _json.dump({
+            "_meta": {"schema_version": 1},
+            "lookback_minutes": 6,
+            "beacon_lookback_minutes": 60,
+            "beacon_min_occurrences": 6,
+            "dga_threshold": 0.65,
+            "nxdomain_rate_threshold": 0.30,
+            "beacon_max_interval_cv": 0.15,
+            "volume_sigma_threshold": 3.0,
+        }, fh)
+
+
+def test_calibrate_all_writes_json_and_history(db, tmp_path) -> None:
     legit = [
         "google.com", "github.com", "stackoverflow.com", "youtube.com",
         "wikipedia.org", "anthropic.com", "claude.ai", "stripe.com",
@@ -456,10 +453,14 @@ def test_calibrate_all_writes_every_parameter(db) -> None:
                         t=base_t + k * 60.0, qid=1000 + k)
         )
     client = FakePiHoleClient(queries)
+    cfg_path = str(tmp_path / "dynamic_config.json")
+    _seed_dynamic_config(cfg_path)
+
     results = cal_mod.calibrate_all(
         client, db,
         lookback_days=7, n_synthetic_dga=200, target_fpr=0.05,
         beacon_lookback_hours=24,
+        dynamic_config_path=cfg_path,
     )
     assert {
         "dga_threshold",
@@ -467,14 +468,19 @@ def test_calibrate_all_writes_every_parameter(db) -> None:
         "beacon_cv_threshold",
         "volume_sigma_threshold",
     } == set(results)
-    cal_rows = findings_db.get_all_calibrations(db)
-    assert {
-        "dga_threshold",
-        "nxdomain_rate_threshold",
-        "beacon_cv_threshold",
-        "volume_sigma_threshold",
-    } <= set(cal_rows)
-    # History has at least one entry per parameter.
+
+    # JSON now reflects calibrated values.
+    import json as _json
+    with open(cfg_path, "r", encoding="utf-8") as fh:
+        new_cfg = _json.load(fh)
+    assert new_cfg["dga_threshold"] == results["dga_threshold"]["optimal_value"]
+    assert new_cfg["nxdomain_rate_threshold"] == results["nxdomain_rate_threshold"]["optimal_value"]
+    # beacon_cv_threshold result -> beacon_max_interval_cv config key
+    assert new_cfg["beacon_max_interval_cv"] == results["beacon_cv_threshold"]["optimal_value"]
+    assert new_cfg["volume_sigma_threshold"] == results["volume_sigma_threshold"]["optimal_value"]
+    assert new_cfg["_meta"]["last_calibrated_at"] is not None
+
+    # History has one row per parameter.
     history = findings_db.calibration_history(db, limit=100)
     params_in_history = {h["parameter"] for h in history}
     assert {
@@ -483,6 +489,9 @@ def test_calibrate_all_writes_every_parameter(db) -> None:
         "beacon_cv_threshold",
         "volume_sigma_threshold",
     } == params_in_history
+    # The seeded prior values become old_value entries.
+    dga_h = [h for h in history if h["parameter"] == "dga_threshold"]
+    assert dga_h and dga_h[0]["old_value"] == 0.65
 
 
 # ---------------------------------------------------------------------------

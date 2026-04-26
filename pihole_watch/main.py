@@ -16,6 +16,10 @@ CHANGELOG:
                                       from findings.db at startup. Env
                                       overrides win, then calibration table,
                                       then built-in defaults.
+2026-04-26            Claude      [Refactor] Tuning now comes from
+                                      dynamic_config.json (read fresh every
+                                      cycle = effective hot-reload). Drop
+                                      the calibration-table merge layer.
 --------------------------------------------------------------------------------
 """
 
@@ -25,7 +29,6 @@ import logging
 import os
 import sys
 import time
-from dataclasses import replace
 from datetime import datetime, timezone
 
 sys.path.insert(0, "/home/pistrommy/projects")
@@ -39,7 +42,7 @@ from pihole_watch.anomaly import (  # noqa: E402
 )
 from pihole_watch.api import PiHoleAPIError, PiHoleClient  # noqa: E402
 from pihole_watch.beacon import detect_beacons  # noqa: E402
-from pihole_watch.config import WatchConfig, load_config  # noqa: E402
+from pihole_watch.config import load_config  # noqa: E402
 from pihole_watch.dga import dga_score  # noqa: E402
 from pihole_watch import findings as findings_db  # noqa: E402
 
@@ -48,52 +51,6 @@ _BLOCKED_STATUSES: frozenset[str] = frozenset({
     "GRAVITY", "DENYLIST", "REGEX", "BLACKLIST",
     "BLACKLIST_CNAME", "GRAVITY_CNAME", "DENYLIST_CNAME",
 })
-
-
-# Calibration-table parameter -> (config field name, env-var name)
-_CALIBRATED_PARAMS: tuple[tuple[str, str, str], ...] = (
-    ("dga_threshold", "dga_threshold", "WATCH_DGA_THRESHOLD"),
-    (
-        "nxdomain_rate_threshold",
-        "nxdomain_rate_threshold",
-        "WATCH_NXDOMAIN_RATE_THRESHOLD",
-    ),
-    (
-        "beacon_cv_threshold",
-        "beacon_max_interval_cv",
-        "WATCH_BEACON_MAX_INTERVAL_CV",
-    ),
-    (
-        "volume_sigma_threshold",
-        "volume_sigma_threshold",
-        "WATCH_VOLUME_SIGMA_THRESHOLD",
-    ),
-)
-
-
-def apply_calibration(cfg: WatchConfig, conn) -> tuple[WatchConfig, dict[str, str]]:
-    """Layer calibration values on top of the config.
-
-    Precedence: explicit env override > calibration table > built-in default.
-
-    Returns (new_config, source_map) where source_map describes which
-    layer each field's final value came from for logging.
-    """
-    sources: dict[str, str] = {}
-    overrides: dict[str, float] = {}
-    for param_name, field, env_var in _CALIBRATED_PARAMS:
-        if env_var in os.environ:
-            sources[field] = "env"
-            continue
-        cal = findings_db.get_calibration(conn, param_name)
-        if cal is None:
-            sources[field] = "default"
-            continue
-        overrides[field] = float(cal["value"])
-        sources[field] = "calibration"
-    if overrides:
-        cfg = replace(cfg, **overrides)
-    return cfg, sources
 
 
 def _now_iso() -> str:
@@ -149,18 +106,11 @@ def main() -> int:
     try:
         conn = findings_db.connect(cfg.db_path)
 
-        # Apply autonomous-calibration values from the calibration table.
-        cfg, cal_sources = apply_calibration(cfg, conn)
         logger.info(
-            "calibration applied: dga=%.3f(%s) nx=%.3f(%s) "
-            "beacon_cv=%.3f(%s) vol_sigma=%.2f(%s)",
-            cfg.dga_threshold, cal_sources.get("dga_threshold", "default"),
-            cfg.nxdomain_rate_threshold,
-            cal_sources.get("nxdomain_rate_threshold", "default"),
-            cfg.beacon_max_interval_cv,
-            cal_sources.get("beacon_max_interval_cv", "default"),
-            cfg.volume_sigma_threshold,
-            cal_sources.get("volume_sigma_threshold", "default"),
+            "tuning loaded from dynamic_config.json: dga=%.3f nx=%.3f "
+            "beacon_cv=%.3f vol_sigma=%.2f",
+            cfg.dga_threshold, cfg.nxdomain_rate_threshold,
+            cfg.beacon_max_interval_cv, cfg.volume_sigma_threshold,
         )
 
         # 1. Pull queries for the short-window analyses (DGA/NXDOMAIN/volume)

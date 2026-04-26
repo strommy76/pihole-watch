@@ -16,6 +16,9 @@ CHANGELOG:
 2026-04-26            Claude      [Feature] Add `calibrate` and
                                       `show-calibration` subcommands for
                                       autonomous threshold tuning.
+2026-04-26            Claude      [Refactor] `show-calibration` now reads
+                                      current values from dynamic_config.json
+                                      and history from the audit table.
 --------------------------------------------------------------------------------
 """
 
@@ -31,7 +34,7 @@ from typing import Any, Sequence
 sys.path.insert(0, "/home/pistrommy/projects")
 
 from pihole_watch import findings as findings_db  # noqa: E402
-from pihole_watch.config import load_config  # noqa: E402
+from pihole_watch.config import load_config, load_dynamic_config  # noqa: E402
 from pihole_watch import calibrate as calibrate_mod  # noqa: E402
 
 
@@ -318,7 +321,7 @@ def cmd_weekly_report(
             prec = b["confirmed"] / denom * 100.0
             hint = ""
             if ftype == "dga" and prec < 25 and denom >= 5:
-                hint = " (consider raising WATCH_DGA_THRESHOLD)"
+                hint = " (consider raising dga_threshold in dynamic_config.json)"
             out.append(
                 f"- {type_label[ftype]}: {b['confirmed']}/{denom} "
                 f"= {prec:.0f}%{hint}"
@@ -449,35 +452,44 @@ def cmd_calibrate(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
         else:
             _print_percentile_diag(res)
         print()
-    print("Calibration table updated. Use `show-calibration` to view current values.")
+    print("dynamic_config.json updated. Use `show-calibration` to view current values.")
     return 0
 
 
+# Map calibration history `parameter` -> dynamic_config.json key.
+# (Same mapping calibrate.py uses; duplicated here to avoid coupling
+# the CLI to internals of calibrate.py.)
+_CAL_PARAM_TO_CONFIG_KEY: dict[str, str] = {
+    "dga_threshold": "dga_threshold",
+    "nxdomain_rate_threshold": "nxdomain_rate_threshold",
+    "beacon_cv_threshold": "beacon_max_interval_cv",
+    "volume_sigma_threshold": "volume_sigma_threshold",
+}
+
+
 def cmd_show_calibration(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
-    """Print the current calibration values vs built-in defaults."""
-    cal = findings_db.get_all_calibrations(conn)
+    """Print the current tuning values (from dynamic_config.json) vs defaults."""
+    try:
+        cfg = load_dynamic_config()
+    except Exception as exc:  # noqa: BLE001 -- surface errors to operator
+        print(f"error: failed to read dynamic_config.json: {exc}", file=sys.stderr)
+        return 1
+
+    last_cal = (cfg.get("_meta") or {}).get("last_calibrated_at")
+    print(f"dynamic_config.json (last calibrated: {last_cal or 'never'})")
+    print()
     print(
-        f"  {'parameter':<26} {'default':>10} {'current':>10} "
-        f"{'method':<12} {'updated_at'}"
+        f"  {'parameter':<26} {'default':>10} {'current':>10}"
     )
-    print("  " + "-" * 90)
-    rows = 0
+    print("  " + "-" * 50)
     for param, default in _CAL_DEFAULTS.items():
-        row = cal.get(param)
-        if row is None:
-            print(
-                f"  {param:<26} {default:>10.4f} {'(unset)':>10} "
-                f"{'-':<12} -"
-            )
+        config_key = _CAL_PARAM_TO_CONFIG_KEY[param]
+        current = cfg.get(config_key)
+        if current is None:
+            print(f"  {param:<26} {default:>10.4f} {'(missing)':>10}")
             continue
-        rows += 1
-        print(
-            f"  {param:<26} {default:>10.4f} {row['value']:>10.4f} "
-            f"{row['method']:<12} {row['updated_at']}"
-        )
-    if not rows:
-        print()
-        print("  (no calibration recorded -- run `calibrate` to populate)")
+        print(f"  {param:<26} {default:>10.4f} {float(current):>10.4f}")
+
     # Show recent history (last 10 events).
     history = findings_db.calibration_history(conn, limit=10)
     if history:
