@@ -98,9 +98,10 @@ Environment="OLLAMA_KEEP_ALIVE=$OLLAMA_KEEP_ALIVE"
 Environment="OLLAMA_MODELS=/usr/share/ollama/.ollama/models"
 Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 
-# Hardening
+# Hardening (with daemon's home whitelisted for key + model storage)
 NoNewPrivileges=true
 ProtectSystem=full
+ReadWritePaths=/usr/share/ollama
 ProtectHome=true
 PrivateTmp=true
 
