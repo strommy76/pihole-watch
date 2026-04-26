@@ -7,7 +7,7 @@
 *Read-only. Autonomous. Fail-loud. Detection in 350 ms on a Pi 5.*
 *Heuristic detection + local-LLM triage. No cloud calls.*
 
-[![tests](https://img.shields.io/badge/tests-91%20passing-success)]()
+[![tests](https://img.shields.io/badge/tests-94%20passing-success)]()
 [![python](https://img.shields.io/badge/python-3.11+-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-lightgrey)]()
 [![pi-hole](https://img.shields.io/badge/pi--hole-API%20v6-red)]()
@@ -76,8 +76,9 @@ flowchart LR
 |---|---|---|
 | 🔐 `.env` | Secrets + paths only | `PIHOLE_PASSWORD`, `OLLAMA_URL`, DB + log paths |
 | ⚙️ `dynamic_config.json` | **Current tuning values (SSOT)** | Thresholds, windows, triage cadence + model |
-| 🗃️ `findings.db` (SQLite) | Observations only | Findings, baselines, snapshots, calibration history |
+| 🗃️ `findings.db` (SQLite) | Observations only | Findings, baselines, snapshots, calibration history, **triage event log** |
 | 🧠 Ollama (loopback) | Local LLM for triage | `qwen3:4b` model, 5-min idle unload |
+| 📜 `watch.log` (JSONL) | Forensic event stream | One JSON object per line; jq-queryable, logrotate-friendly |
 
 Code reads `dynamic_config.json` fresh every cycle — a manual edit takes
 effect on the **next 5-minute tick**, no restart. The autonomous calibrator
@@ -297,6 +298,33 @@ parse error, schema mismatch — every failure is logged as a warning
 and leaves the finding `pending` for a human to review. Detection
 itself never aborts on a triage problem.
 
+### Effectiveness measurement
+
+Every triage event (AI or human) is logged to a `triage_log` audit table.
+`findings.triage_outcome` holds the latest verdict (mutable); `triage_log`
+holds the full history (append-only) so AI ↔ human agreement can be
+measured even after a human override.
+
+When you triage a finding the LLM already classified, the second event
+joins the log. Whether your verdict matches the LLM's becomes a
+`confirmation` (match) or `correction` (override). The dashboard surfaces
+both side-by-side so weak-spots in the model are visible.
+
+```sql
+-- per-finding event chain
+SELECT triaged_at, source, model, outcome, note
+FROM triage_log WHERE finding_id = 42 ORDER BY id;
+
+-- AI ↔ human agreement %
+WITH paired AS (
+  SELECT finding_id,
+         MAX(CASE WHEN source='ai'    THEN outcome END) AS ai_v,
+         MAX(CASE WHEN source='human' THEN outcome END) AS human_v
+  FROM triage_log GROUP BY finding_id
+  HAVING ai_v IS NOT NULL AND human_v IS NOT NULL)
+SELECT 100.0 * SUM(ai_v=human_v) / NULLIF(COUNT(*),0) FROM paired;
+```
+
 ---
 
 ## 🚨 Findings + triage
@@ -384,6 +412,15 @@ sqlite3 findings.db "SELECT * FROM run_log ORDER BY run_at DESC LIMIT 10;"
 sqlite3 findings.db "SELECT * FROM calibration_history
   ORDER BY calibrated_at DESC LIMIT 20;"
 
+# Triage event chain for one finding (AI verdict + later human override)
+sqlite3 findings.db "SELECT triaged_at, source, model, outcome, note
+  FROM triage_log WHERE finding_id = 42 ORDER BY id;"
+
+# AI verdict distribution (last 7 days)
+sqlite3 findings.db "SELECT outcome, COUNT(*) FROM triage_log
+  WHERE source='ai' AND triaged_at >= datetime('now','-7 day')
+  GROUP BY outcome;"
+
 # Findings in the last hour, by type
 sqlite3 findings.db "SELECT finding_type, COUNT(*) FROM findings
   WHERE detected_at > datetime('now', '-1 hour') GROUP BY finding_type;"
@@ -393,8 +430,10 @@ sqlite3 findings.db "SELECT finding_type, COUNT(*) FROM findings
 
 ## 📊 Grafana setup
 
-The dashboard at `grafana/pihole-watch.json` has 16 panels covering the
-snapshot timeline, findings, triage status, and detector health.
+The dashboard at `grafana/pihole-watch.json` has **21 panels** across
+four sections: Pi-hole timeline, findings, run health, and AI triage
+effectiveness (agreement %, confirmations, corrections, verdict
+distribution, per-event audit table).
 
 It uses [`frser-sqlite-datasource`](https://grafana.com/grafana/plugins/frser-sqlite-datasource/)
 with UID `pihole-watch-sqlite-ds` pointing at this repo's `findings.db`.
@@ -479,11 +518,12 @@ These are non-negotiable for the project:
 - 📡 **Per-client beacon baselines** *(currently per `(client, domain)` only)*.
 - 📊 **Calibration-drift panel** in Grafana visualising
   `calibration_history` over time.
-- 🧠 **Triage precision telemetry** — track LLM agreement vs human
-  triage when both exist, surface drift in the weekly report.
-- 🏷️ **Per-finding LLM provenance column** — store model name + version
-  in a dedicated column instead of the free-form note, so we can graph
-  triage performance per model when we A/B test.
+- 📰 **Triage agreement in the weekly report** — surface AI/human
+  agreement % per detector in `cli weekly-report` so model drift is
+  visible in the routine summary, not only on the dashboard.
+- 🅰️🅱️ **A/B different LLMs against the same borderline band** — pull
+  per-model performance from `triage_log.model` to compare qwen3:4b
+  vs gemma3:4b vs phi4-mini on the same domain stream.
 
 ---
 
