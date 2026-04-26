@@ -20,6 +20,13 @@ CHANGELOG:
                                       dynamic_config.json (read fresh every
                                       cycle = effective hot-reload). Drop
                                       the calibration-table merge layer.
+2026-04-26            Claude      [Feature] Best-effort LLM triage step
+                                      after detection. Borderline DGA
+                                      findings (score in band) get
+                                      auto-classified by qwen3:4b via
+                                      Ollama on loopback. Gated by
+                                      cfg.triage.enabled; failures are
+                                      logged and never crash the cycle.
 --------------------------------------------------------------------------------
 """
 
@@ -45,6 +52,7 @@ from pihole_watch.beacon import detect_beacons  # noqa: E402
 from pihole_watch.config import load_config  # noqa: E402
 from pihole_watch.dga import dga_score  # noqa: E402
 from pihole_watch import findings as findings_db  # noqa: E402
+from pihole_watch import triage as triage_mod  # noqa: E402
 
 
 _BLOCKED_STATUSES: frozenset[str] = frozenset({
@@ -283,6 +291,29 @@ def main() -> int:
 
         # 6. Update baselines on this short window
         update_baselines(conn, short_queries)
+
+        # 7. Best-effort LLM triage of borderline DGA findings.
+        # Gated by config; never crashes the cycle (errors are logged
+        # and the findings stay 'pending' for a human to review later).
+        if cfg.triage.enabled:
+            try:
+                tcounts = triage_mod.triage_borderline_findings(
+                    conn,
+                    ollama_url=cfg.ollama_url,
+                    model=cfg.triage.model,
+                    score_min=cfg.triage.score_min,
+                    score_max=cfg.triage.score_max,
+                    max_per_cycle=cfg.triage.max_per_cycle,
+                    timeout_seconds=cfg.triage.timeout_seconds,
+                )
+                if tcounts["considered"] > 0:
+                    logger.info(
+                        "triage: considered=%d classified=%d errors=%d",
+                        tcounts["considered"], tcounts["classified"],
+                        tcounts["errors"],
+                    )
+            except Exception as exc:  # noqa: BLE001 -- triage is best-effort
+                logger.warning("triage layer failed (non-fatal): %s", exc)
 
     except PiHoleAPIError as exc:
         err_msg = f"PiHoleAPIError: {exc}"

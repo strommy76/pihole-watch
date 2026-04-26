@@ -58,13 +58,33 @@ _TUNABLE_FIELDS: tuple[str, ...] = (
     "volume_sigma_threshold",
 )
 
+_TRIAGE_FIELDS: tuple[str, ...] = (
+    "enabled",
+    "model",
+    "score_min",
+    "score_max",
+    "max_per_cycle",
+    "timeout_seconds",
+)
+
+
+@dataclass(frozen=True)
+class TriageConfig:
+    """Local-LLM triage layer settings."""
+    enabled: bool
+    model: str
+    score_min: float
+    score_max: float
+    max_per_cycle: int
+    timeout_seconds: float
+
 
 @dataclass(frozen=True)
 class WatchConfig:
     """Frozen runtime config for the pihole-watch service.
 
     Layer 1 (secrets/paths from .env): pihole_url, pihole_password,
-        db_path, log_path.
+        db_path, log_path, ollama_url.
     Layer 2 (tuning from dynamic_config.json): everything else.
     """
 
@@ -72,6 +92,7 @@ class WatchConfig:
     pihole_password: str
     db_path: str
     log_path: str
+    ollama_url: str
     lookback_minutes: int
     dga_threshold: float
     nxdomain_rate_threshold: float
@@ -79,6 +100,7 @@ class WatchConfig:
     beacon_max_interval_cv: float
     beacon_lookback_minutes: int
     volume_sigma_threshold: float
+    triage: TriageConfig
 
 
 def load_dynamic_config(path: str | None = None) -> dict[str, Any]:
@@ -190,6 +212,25 @@ def load_config(
 
     tuning = load_dynamic_config(dynamic_config_path)
 
+    triage_raw = tuning.get("triage")
+    if not isinstance(triage_raw, dict):
+        raise ConfigError(
+            "dynamic_config.json missing 'triage' object (LLM triage settings)"
+        )
+    triage_missing = [k for k in _TRIAGE_FIELDS if k not in triage_raw]
+    if triage_missing:
+        raise ConfigError(
+            f"dynamic_config.json triage missing keys: {triage_missing}"
+        )
+    triage = TriageConfig(
+        enabled=bool(triage_raw["enabled"]),
+        model=str(triage_raw["model"]),
+        score_min=float(triage_raw["score_min"]),
+        score_max=float(triage_raw["score_max"]),
+        max_per_cycle=int(triage_raw["max_per_cycle"]),
+        timeout_seconds=float(triage_raw["timeout_seconds"]),
+    )
+
     return WatchConfig(
         pihole_url=get("PIHOLE_URL", "http://localhost:8080") or "http://localhost:8080",
         pihole_password=require("PIHOLE_PASSWORD"),
@@ -197,6 +238,7 @@ def load_config(
         or os.path.join(_BASE, "findings.db"),
         log_path=get("LOG_PATH", os.path.join(_BASE, "watch.log"))
         or os.path.join(_BASE, "watch.log"),
+        ollama_url=get("OLLAMA_URL", "http://127.0.0.1:11434") or "http://127.0.0.1:11434",
         lookback_minutes=int(tuning["lookback_minutes"]),
         dga_threshold=float(tuning["dga_threshold"]),
         nxdomain_rate_threshold=float(tuning["nxdomain_rate_threshold"]),
@@ -204,11 +246,13 @@ def load_config(
         beacon_max_interval_cv=float(tuning["beacon_max_interval_cv"]),
         beacon_lookback_minutes=int(tuning["beacon_lookback_minutes"]),
         volume_sigma_threshold=float(tuning["volume_sigma_threshold"]),
+        triage=triage,
     )
 
 
 __all__ = [
     "WatchConfig",
+    "TriageConfig",
     "load_config",
     "load_dynamic_config",
     "write_dynamic_config",

@@ -11,5 +11,13 @@
   "dga_threshold": 0.65,
   "nxdomain_rate_threshold": 0.30,
   "beacon_max_interval_cv": 0.15,
-  "volume_sigma_threshold": 3.0
+  "volume_sigma_threshold": 3.0,
+  "triage": {
+    "enabled": false,
+    "model": "qwen3:4b",
+    "score_min": 0.65,
+    "score_max": 0.85,
+    "max_per_cycle": 5,
+    "timeout_seconds": 90.0
+  }
 }
