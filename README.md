@@ -4,12 +4,14 @@
 
 **An AI/ML threat-detection sidecar for [Pi-hole](https://pi-hole.net/).**
 
-*Read-only. Autonomous. Fail-loud. Runs in 350 ms on a Pi 5.*
+*Read-only. Autonomous. Fail-loud. Detection in 350 ms on a Pi 5.*
+*Heuristic detection + local-LLM triage. No cloud calls.*
 
-[![tests](https://img.shields.io/badge/tests-93%20passing-success)]()
+[![tests](https://img.shields.io/badge/tests-91%20passing-success)]()
 [![python](https://img.shields.io/badge/python-3.11+-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-lightgrey)]()
 [![pi-hole](https://img.shields.io/badge/pi--hole-API%20v6-red)]()
+[![llm](https://img.shields.io/badge/triage-qwen3:4b%20via%20Ollama-purple)]()
 
 </div>
 
@@ -17,12 +19,20 @@
 
 `pihole-watch` pulls the Pi-hole query log every 5 minutes, runs four
 lightweight detectors, and writes findings to its own SQLite store.
-Detector thresholds **autonomously recalibrate weekly** from your own
-traffic — no manual tuning, no model files, nothing in the DNS hot
-path.
 
-The point is to demonstrate value with simple, proven techniques rather
-than chase state-of-the-art ML.
+- 🛡️ Detector thresholds **autonomously recalibrate weekly** from
+  your own traffic — no manual tuning, no model files, nothing in
+  the DNS hot path.
+- 🧠 Borderline DGA findings (where heuristics are weakest) are
+  **auto-triaged daily** by a local LLM (`qwen3:4b` via Ollama on
+  loopback). The model knows what cloud/CDN/SaaS hostnames look like
+  and clears the long tail of false positives without sending a byte
+  off-host.
+- ⚙️ Every cadence, threshold, and window is a single JSON edit.
+  Monte Carlo / ROC tunes the JSON, never the source.
+
+Demonstrates value with proven, simple techniques rather than chasing
+state-of-the-art ML.
 
 ---
 
@@ -43,7 +53,7 @@ rate, top-blocked domain, etc.
 
 ## 🏗️ Architecture
 
-Three layers, each with one job. **Config is config; data is data.**
+Three storage layers, each with one job. **Config is config; data is data.**
 
 ```mermaid
 flowchart LR
@@ -51,6 +61,7 @@ flowchart LR
     PW["🛡️ pihole-watch<br/>(systemd oneshot,<br/>5 min)"] -->|writes findings| DB[("🗃️ findings.db<br/>SQLite + WAL")]
     PW -.reads.-> ENV[".env<br/>secrets + paths"]
     PW -.reads.-> CFG["⚙️ dynamic_config.json<br/>tuning (SSOT)"]
+    PW <-->|"borderline DGA<br/>(daily, gated)"| OL[("🧠 Ollama<br/>qwen3:4b<br/>loopback only")]
     CAL["🎯 calibrator<br/>(weekly)"] -->|atomic write| CFG
     CAL -->|append audit row| DB
     DB -->|read-only mount| GR[("📊 Grafana<br/>16-panel dashboard")]
@@ -58,18 +69,21 @@ flowchart LR
     style CAL fill:#7c2d12,stroke:#ea580c,color:#fff
     style CFG fill:#365314,stroke:#84cc16,color:#fff
     style DB fill:#1e293b,stroke:#94a3b8,color:#fff
+    style OL fill:#581c87,stroke:#a855f7,color:#fff
 ```
 
 | Layer | Purpose | What lives here |
 |---|---|---|
-| 🔐 `.env` | Secrets + paths only | `PIHOLE_PASSWORD`, DB path, log path |
-| ⚙️ `dynamic_config.json` | **Current tuning values (SSOT)** | All 7 thresholds + windows |
+| 🔐 `.env` | Secrets + paths only | `PIHOLE_PASSWORD`, `OLLAMA_URL`, DB + log paths |
+| ⚙️ `dynamic_config.json` | **Current tuning values (SSOT)** | Thresholds, windows, triage cadence + model |
 | 🗃️ `findings.db` (SQLite) | Observations only | Findings, baselines, snapshots, calibration history |
+| 🧠 Ollama (loopback) | Local LLM for triage | `qwen3:4b` model, 5-min idle unload |
 
 Code reads `dynamic_config.json` fresh every cycle — a manual edit takes
 effect on the **next 5-minute tick**, no restart. The autonomous calibrator
-atomic-writes the same file weekly. Threshold drift goes to
-`calibration_history` so you can graph it.
+atomic-writes the same file weekly. Threshold drift and triage cadence
+live as `_meta` timestamps; threshold values themselves are versioned in
+`calibration_history`.
 
 ---
 
@@ -104,10 +118,18 @@ sudo systemctl enable --now pihole-watch.timer pihole-watch-calibrate.timer
 
 | Timer | Cadence | What it does |
 |---|---|---|
-| `pihole-watch.timer` | **every 5 min** | Detection cycle |
+| `pihole-watch.timer` | **every 5 min** | Detection + (gated) LLM triage |
 | `pihole-watch-calibrate.timer` | **Sundays 03:30 local** | ROC + percentile recalibration |
 
-Both are `oneshot` — they exit cleanly after each run.
+Both are `oneshot` — they exit cleanly after each run. LLM triage is
+*not* a separate timer; it piggybacks on the detection cycle and self-
+gates on `triage.interval_hours` (default 24h), so 287 of 288 daily
+ticks stay at ~350 ms and 1 takes ~90 s when the LLM is engaged.
+
+> 🧠 **Optional but recommended:** install Ollama via
+> `scripts/install-ollama.sh` to enable the LLM triage layer. Without
+> it, set `triage.enabled=false` in `dynamic_config.json` — the
+> heuristic detection still runs fine on its own.
 
 ---
 
@@ -120,6 +142,7 @@ PIHOLE_URL=http://localhost:8080
 PIHOLE_PASSWORD=...
 WATCH_DB_PATH=/home/pistrommy/projects/pihole-watch/findings.db
 LOG_PATH=/home/pistrommy/projects/pihole-watch/watch.log
+OLLAMA_URL=http://127.0.0.1:11434          # only used when triage.enabled
 ```
 
 > 🚫 **Anything tunable does NOT belong here.** Tuning lives in JSON.
@@ -128,20 +151,35 @@ LOG_PATH=/home/pistrommy/projects/pihole-watch/watch.log
 
 ```json
 {
-  "_meta": { "schema_version": 1, "last_calibrated_at": "2026-04-26T..." },
+  "_meta": {
+    "schema_version": 1,
+    "last_calibrated_at": "2026-04-26T...",
+    "last_triage_at": "2026-04-26T..."
+  },
   "lookback_minutes": 6,
   "beacon_lookback_minutes": 60,
   "beacon_min_occurrences": 6,
   "dga_threshold": 0.77,
   "nxdomain_rate_threshold": 0.473,
   "beacon_max_interval_cv": 0.20,
-  "volume_sigma_threshold": 10.0
+  "volume_sigma_threshold": 10.0,
+  "triage": {
+    "enabled": true,
+    "model": "qwen3:4b",
+    "score_min": 0.65,
+    "score_max": 0.85,
+    "max_per_run": 20,
+    "interval_hours": 24,
+    "timeout_seconds": 90.0
+  }
 }
 ```
 
 **A/B testing is just an edit.** Want a tighter DGA filter?
 `vim dynamic_config.json`, save, the next 5-minute cycle picks it up.
-Manual changes survive until the next weekly calibration overwrites them.
+Want hourly triage instead of daily? Set `interval_hours: 1`. Manual
+changes survive until the next weekly calibration overwrites the
+threshold fields.
 
 ---
 
@@ -193,6 +231,74 @@ ceilings so a quiet week can't push the bar to zero.
 
 ---
 
+## 🧠 Local-LLM triage
+
+The heuristic DGA scorer is least confident in the **0.65–0.85 band** —
+exactly where hash-prefixed AWS endpoints, signed CDN edges, and IoT
+update services live. These produce a steady stream of false positives
+that drown the legitimate signal.
+
+The triage layer sends those borderline findings to a local LLM
+(`qwen3:4b` via Ollama on loopback) with a strict JSON schema asking
+"DGA, legitimate, or unclear?" The classification routes the finding
+into the existing triage outcome column.
+
+```mermaid
+flowchart LR
+    F["🚨 Pending finding<br/>0.65 ≤ score < 0.85"] --> Q
+    Q["📡 Ollama<br/>POST /api/chat<br/>think: false<br/>JSON schema"] --> R
+    R{"📋 Classification"}
+    R -->|"dga"| C["✅ confirmed<br/>(real threat)"]
+    R -->|"legitimate"| FP["❌ false_positive<br/>(known service)"]
+    R -->|"unclear"| P["⏳ stays pending<br/>(human review)"]
+    style F fill:#7c2d12,stroke:#ea580c,color:#fff
+    style Q fill:#581c87,stroke:#a855f7,color:#fff
+    style R fill:#1e3a8a,stroke:#3b82f6,color:#fff
+```
+
+### Performance on a Pi 5 (8 GB)
+
+| | Cold load | Warm call | Daily budget at 5 findings |
+|---|---:|---:|---:|
+| qwen3:4b | ~30 s | 18–22 s | ~2 min/day |
+
+### Real classification examples
+
+| Domain | Verdict | Rationale |
+|---|---|---|
+| `xkjdhqwiehqwehq.xyz` | 🟥 `dga` | High DGA score, random pattern |
+| `cdn.cloudflare.com` | 🟩 `legitimate` | Known Cloudflare CDN |
+| `a4f8e2c1.execute-api.us-east-1.amazonaws.com` | 🟩 `legitimate` | AWS execute-api endpoint |
+| `signalrp2-relayhub-prod-na01-1.service.signalr.net` | 🟩 `legitimate` | Matches Azure SignalR pattern |
+| `liveupdate01s.asus.com` | 🟩 `legitimate` | ASUS update service |
+
+That last cluster is the win — exactly the cloud/SaaS shape that fools
+length-and-entropy heuristics.
+
+### Cadence is a config knob
+
+Triage runs inline with detection but self-gates on
+`triage.interval_hours`. Default 24 h means 287 of 288 daily ticks stay
+fast; 1 fires the LLM. Edit the JSON to change cadence — no code, no
+systemd touch.
+
+```bash
+# Run triage on demand (ignores the interval gate)
+.venv/bin/python -m pihole_watch.cli triage-run
+
+# Disable triage entirely without disabling systemd
+# → set "triage.enabled": false in dynamic_config.json
+```
+
+### Failure modes
+
+The triage step is **best-effort**. Ollama down, network timeout, JSON
+parse error, schema mismatch — every failure is logged as a warning
+and leaves the finding `pending` for a human to review. Detection
+itself never aborts on a triage problem.
+
+---
+
 ## 🚨 Findings + triage
 
 Every finding carries a triage outcome. Default `pending`; you graduate
@@ -240,11 +346,12 @@ PYTHONPATH=$(realpath ..) .venv/bin/python -m pihole_watch.cli <command>
 | Command | Purpose |
 |---|---|
 | `list [--limit N] [--outcome O] [--type T]` | Print recent findings, filtered |
-| `triage FINDING_ID --outcome O [--note "..."]` | Stamp a finding's outcome |
+| `triage FINDING_ID --outcome O [--note "..."]` | Manually stamp a finding's outcome |
 | `summary [--since YYYY-MM-DD]` | Per-detector triage rollup with precision % |
 | `weekly-report` | Markdown summary for the last 7 days |
 | `calibrate` | Run autonomous threshold calibration now |
 | `show-calibration` | Print current tuning vs defaults + recent history |
+| `triage-run` | Run LLM triage over pending borderline findings now (ignores interval gate) |
 
 ```bash
 # Last 20 pending DGA findings
@@ -333,10 +440,11 @@ pihole-watch/
 │   ├── beacon.py          ← Periodic-query / C2 beacon detector
 │   ├── findings.py        ← SQLite store + DAO
 │   ├── calibrate.py       ← ROC + percentile threshold calibration
+│   ├── triage.py          ← Local-LLM triage (Ollama / qwen3:4b)
 │   ├── config.py          ← Two-layer config loader (.env + JSON)
 │   ├── main.py            ← systemd-oneshot entry point
-│   └── cli.py             ← list / triage / summary / calibrate
-├── 🧪 tests/              ← 93 tests (pytest)
+│   └── cli.py             ← list / triage / summary / calibrate / triage-run
+├── 🧪 tests/              ← 91 tests (pytest)
 ├── 📊 grafana/
 │   └── pihole-watch.json  ← 16-panel dashboard
 ├── 🔧 scripts/
@@ -368,11 +476,14 @@ These are non-negotiable for the project:
 
 ## 🛣️ Roadmap
 
-- 🧠 **Local-LLM triage** for borderline DGA findings (score 0.65–0.85)
-  using Ollama with `qwen3:4b` on the same host. Install script ready
-  at `scripts/install-ollama.sh`; triage module is the next piece.
 - 📡 **Per-client beacon baselines** *(currently per `(client, domain)` only)*.
-- 📊 **Calibration-drift panel** in Grafana.
+- 📊 **Calibration-drift panel** in Grafana visualising
+  `calibration_history` over time.
+- 🧠 **Triage precision telemetry** — track LLM agreement vs human
+  triage when both exist, surface drift in the weekly report.
+- 🏷️ **Per-finding LLM provenance column** — store model name + version
+  in a dedicated column instead of the free-form note, so we can graph
+  triage performance per model when we A/B test.
 
 ---
 
