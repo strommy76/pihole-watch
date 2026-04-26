@@ -11,6 +11,9 @@ CHANGELOG:
                                       table, triage columns on findings, and
                                       additive _apply_migrations(). Idempotent
                                       and safe on existing DBs.
+2026-04-26            Claude      [Feature] Add calibration + calibration_history
+                                      tables and DAO helpers for autonomous
+                                      threshold calibration.
 --------------------------------------------------------------------------------
 """
 
@@ -76,6 +79,27 @@ CREATE TABLE IF NOT EXISTS pihole_snapshots (
     top_querying_client TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_at ON pihole_snapshots(snapshot_at);
+
+CREATE TABLE IF NOT EXISTS calibration (
+    parameter TEXT PRIMARY KEY,
+    value REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    method TEXT NOT NULL,
+    metrics_json TEXT,
+    details_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS calibration_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    calibrated_at TEXT NOT NULL,
+    parameter TEXT NOT NULL,
+    old_value REAL,
+    new_value REAL NOT NULL,
+    method TEXT NOT NULL,
+    metrics_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_calibration_history_param
+    ON calibration_history(parameter, calibrated_at);
 """
 
 
@@ -425,6 +449,154 @@ def snapshots_since(
     ]
 
 
+# -- calibration -------------------------------------------------------------
+
+
+def _row_to_calibration(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    """Convert a calibration row to a typed dict, decoding JSON fields."""
+    if row is None:
+        return None
+    metrics = (
+        json.loads(row["metrics_json"]) if row["metrics_json"] is not None else None
+    )
+    details = (
+        json.loads(row["details_json"]) if row["details_json"] is not None else None
+    )
+    return {
+        "parameter": row["parameter"],
+        "value": float(row["value"]),
+        "updated_at": row["updated_at"],
+        "method": row["method"],
+        "metrics": metrics,
+        "details": details,
+    }
+
+
+def set_calibration(
+    conn: sqlite3.Connection,
+    parameter: str,
+    value: float,
+    method: str,
+    metrics: dict[str, Any] | None = None,
+    details: dict[str, Any] | None = None,
+    *,
+    updated_at: str | None = None,
+) -> dict[str, Any]:
+    """Upsert a calibration row and append the prior value to calibration_history.
+
+    All writes happen inside a single transaction so the history record is
+    atomic with the live row update.
+
+    Returns the new calibration row as a dict.
+    """
+    if updated_at is None:
+        updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    metrics_json = json.dumps(metrics) if metrics is not None else None
+    details_json = json.dumps(details) if details is not None else None
+
+    try:
+        with conn:
+            prev = conn.execute(
+                "SELECT value FROM calibration WHERE parameter = ?",
+                (parameter,),
+            ).fetchone()
+            old_value = float(prev["value"]) if prev is not None else None
+            conn.execute(
+                """INSERT INTO calibration
+                   (parameter, value, updated_at, method, metrics_json, details_json)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(parameter) DO UPDATE SET
+                     value = excluded.value,
+                     updated_at = excluded.updated_at,
+                     method = excluded.method,
+                     metrics_json = excluded.metrics_json,
+                     details_json = excluded.details_json""",
+                (
+                    parameter, float(value), updated_at, method,
+                    metrics_json, details_json,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO calibration_history
+                   (calibrated_at, parameter, old_value, new_value, method, metrics_json)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    updated_at, parameter, old_value, float(value), method,
+                    metrics_json,
+                ),
+            )
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"calibration write failed: {exc}") from exc
+
+    row = conn.execute(
+        "SELECT * FROM calibration WHERE parameter = ?", (parameter,)
+    ).fetchone()
+    out = _row_to_calibration(row)
+    assert out is not None
+    return out
+
+
+def get_calibration(
+    conn: sqlite3.Connection, parameter: str
+) -> dict[str, Any] | None:
+    """Return the calibration row for ``parameter`` or None."""
+    row = conn.execute(
+        "SELECT * FROM calibration WHERE parameter = ?", (parameter,)
+    ).fetchone()
+    return _row_to_calibration(row)
+
+
+def get_all_calibrations(
+    conn: sqlite3.Connection,
+) -> dict[str, dict[str, Any]]:
+    """Return ``{parameter: row_dict}`` for every calibration entry."""
+    out: dict[str, dict[str, Any]] = {}
+    for row in conn.execute("SELECT * FROM calibration ORDER BY parameter"):
+        d = _row_to_calibration(row)
+        if d is not None:
+            out[d["parameter"]] = d
+    return out
+
+
+def calibration_history(
+    conn: sqlite3.Connection,
+    parameter: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return calibration_history rows newest first.
+
+    Args:
+        parameter: optional filter to one parameter.
+        limit: max rows to return.
+    """
+    sql = "SELECT * FROM calibration_history"
+    params: list[Any] = []
+    if parameter is not None:
+        sql += " WHERE parameter = ?"
+        params.append(parameter)
+    sql += " ORDER BY calibrated_at DESC, id DESC LIMIT ?"
+    params.append(int(limit))
+    out: list[dict[str, Any]] = []
+    for row in conn.execute(sql, params):
+        metrics = (
+            json.loads(row["metrics_json"])
+            if row["metrics_json"] is not None
+            else None
+        )
+        out.append({
+            "id": int(row["id"]),
+            "calibrated_at": row["calibrated_at"],
+            "parameter": row["parameter"],
+            "old_value": (
+                float(row["old_value"]) if row["old_value"] is not None else None
+            ),
+            "new_value": float(row["new_value"]),
+            "method": row["method"],
+            "metrics": metrics,
+        })
+    return out
+
+
 __all__ = [
     "connect",
     "init_schema",
@@ -441,4 +613,8 @@ __all__ = [
     "record_snapshot",
     "latest_snapshot",
     "snapshots_since",
+    "set_calibration",
+    "get_calibration",
+    "get_all_calibrations",
+    "calibration_history",
 ]

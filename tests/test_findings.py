@@ -38,7 +38,14 @@ def test_schema_creates_expected_tables(db) -> None:
         "AND name NOT LIKE 'sqlite_%' ORDER BY name"
     ).fetchall()
     names = [r["name"] for r in rows]
-    assert names == ["baselines", "findings", "pihole_snapshots", "run_log"]
+    assert names == [
+        "baselines",
+        "calibration",
+        "calibration_history",
+        "findings",
+        "pihole_snapshots",
+        "run_log",
+    ]
 
 
 def test_init_schema_idempotent(db) -> None:

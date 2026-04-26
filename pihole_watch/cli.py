@@ -13,6 +13,9 @@ USAGE:
 
 CHANGELOG:
 2026-04-25            Claude      [Feature] Initial implementation.
+2026-04-26            Claude      [Feature] Add `calibrate` and
+                                      `show-calibration` subcommands for
+                                      autonomous threshold tuning.
 --------------------------------------------------------------------------------
 """
 
@@ -29,6 +32,7 @@ sys.path.insert(0, "/home/pistrommy/projects")
 
 from pihole_watch import findings as findings_db  # noqa: E402
 from pihole_watch.config import load_config  # noqa: E402
+from pihole_watch import calibrate as calibrate_mod  # noqa: E402
 
 
 _OUTCOMES: tuple[str, ...] = ("confirmed", "false_positive", "ignored", "pending")
@@ -340,6 +344,156 @@ def cmd_weekly_report(
     return 0
 
 
+# -- calibrate ---------------------------------------------------------------
+
+
+_CAL_DEFAULTS: dict[str, float] = {
+    "dga_threshold": calibrate_mod.DEFAULT_DGA_THRESHOLD,
+    "nxdomain_rate_threshold": calibrate_mod.DEFAULT_NXDOMAIN_RATE_THRESHOLD,
+    "beacon_cv_threshold": calibrate_mod.DEFAULT_BEACON_CV_THRESHOLD,
+    "volume_sigma_threshold": calibrate_mod.DEFAULT_VOLUME_SIGMA_THRESHOLD,
+}
+
+
+def _print_dga_diag(res: dict[str, Any]) -> None:
+    metrics = res.get("metrics") or {}
+    details = res.get("details") or {}
+    print(
+        f"    metrics: tpr={metrics.get('tpr_at_optimal'):.3f} "
+        f"fpr={metrics.get('fpr_at_optimal'):.3f} "
+        f"f1={metrics.get('f1_at_optimal'):.3f} "
+        f"auroc={metrics.get('auroc'):.3f}"
+    )
+    print(
+        f"    corpus: negative={details.get('negative_corpus_size')} "
+        f"positive={details.get('positive_corpus_size')} "
+        f"target_fpr={details.get('target_fpr')}"
+    )
+    fps = details.get("top_legitimate_false_positives") or []
+    if fps:
+        print("    top legitimate FP candidates (highest-scoring real domains):")
+        for d in fps[:10]:
+            print(f"      - {d}")
+    tps = details.get("top_dga_true_positives") or []
+    if tps:
+        print("    top synthetic DGA samples (highest-scoring fakes):")
+        for d in tps[:5]:
+            print(f"      - {d}")
+
+
+def _print_percentile_diag(res: dict[str, Any]) -> None:
+    metrics = res.get("metrics") or {}
+    sample_size = metrics.get("sample_size")
+    floor = metrics.get("floor")
+    ceiling = metrics.get("ceiling")
+    print(
+        f"    metrics: samples={sample_size} "
+        f"floor={floor} ceiling={ceiling}"
+    )
+    extras: list[str] = []
+    for key in ("p5", "p50", "p95", "p99"):
+        if key in metrics and metrics[key] is not None:
+            extras.append(f"{key}={float(metrics[key]):.4f}")
+    if extras:
+        print("    distribution: " + " ".join(extras))
+
+
+def cmd_calibrate(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
+    """Pull traffic, run all calibrations, store results, print summary."""
+    from pihole_watch.api import PiHoleAPIError, PiHoleClient
+
+    cfg = load_config()
+    print("Running calibration ...")
+    print(f"  Pi-hole URL: {cfg.pihole_url}")
+    print(f"  DB:          {cfg.db_path}")
+    print(f"  lookback:    {args.lookback_days} days")
+    print()
+
+    try:
+        client = PiHoleClient(cfg.pihole_url, cfg.pihole_password)
+        client.authenticate()
+    except PiHoleAPIError as exc:
+        print(f"error: Pi-hole authentication failed: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        results = calibrate_mod.calibrate_all(
+            client,
+            conn,
+            lookback_days=args.lookback_days,
+            n_synthetic_dga=args.n_synthetic_dga,
+            target_fpr=args.target_fpr,
+            beacon_lookback_hours=args.beacon_lookback_hours,
+        )
+    except (PiHoleAPIError, RuntimeError) as exc:
+        print(f"error: calibration failed: {exc}", file=sys.stderr)
+        return 1
+
+    print("Calibration results:")
+    print()
+    for param, res in results.items():
+        default = _CAL_DEFAULTS.get(param)
+        new = res.get("optimal_value")
+        method = res.get("method")
+        if isinstance(new, (int, float)) and isinstance(default, (int, float)):
+            delta = new - default
+            arrow = "->"
+            print(
+                f"  {param}: {default:.4f} {arrow} {new:.4f} "
+                f"(delta {delta:+.4f}, method {method})"
+            )
+        else:
+            print(f"  {param}: {new} (method {method})")
+        if param == "dga_threshold":
+            _print_dga_diag(res)
+        else:
+            _print_percentile_diag(res)
+        print()
+    print("Calibration table updated. Use `show-calibration` to view current values.")
+    return 0
+
+
+def cmd_show_calibration(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
+    """Print the current calibration values vs built-in defaults."""
+    cal = findings_db.get_all_calibrations(conn)
+    print(
+        f"  {'parameter':<26} {'default':>10} {'current':>10} "
+        f"{'method':<12} {'updated_at'}"
+    )
+    print("  " + "-" * 90)
+    rows = 0
+    for param, default in _CAL_DEFAULTS.items():
+        row = cal.get(param)
+        if row is None:
+            print(
+                f"  {param:<26} {default:>10.4f} {'(unset)':>10} "
+                f"{'-':<12} -"
+            )
+            continue
+        rows += 1
+        print(
+            f"  {param:<26} {default:>10.4f} {row['value']:>10.4f} "
+            f"{row['method']:<12} {row['updated_at']}"
+        )
+    if not rows:
+        print()
+        print("  (no calibration recorded -- run `calibrate` to populate)")
+    # Show recent history (last 10 events).
+    history = findings_db.calibration_history(conn, limit=10)
+    if history:
+        print()
+        print("Recent calibration history:")
+        for h in history:
+            old = (
+                f"{h['old_value']:.4f}" if h["old_value"] is not None else "(none)"
+            )
+            print(
+                f"  {h['calibrated_at']}  {h['parameter']:<26} "
+                f"{old} -> {h['new_value']:.4f}  ({h['method']})"
+            )
+    return 0
+
+
 # -- argparse plumbing -------------------------------------------------------
 
 
@@ -375,6 +529,21 @@ def build_parser() -> argparse.ArgumentParser:
         "weekly-report", help="Markdown report for the last 7 days"
     )
     p_week.set_defaults(func=cmd_weekly_report)
+
+    p_cal = sub.add_parser(
+        "calibrate", help="Run autonomous threshold calibration now"
+    )
+    p_cal.add_argument("--lookback-days", type=int, default=7)
+    p_cal.add_argument("--n-synthetic-dga", type=int, default=2000)
+    p_cal.add_argument("--target-fpr", type=float, default=0.02)
+    p_cal.add_argument("--beacon-lookback-hours", type=int, default=24)
+    p_cal.set_defaults(func=cmd_calibrate)
+
+    p_show = sub.add_parser(
+        "show-calibration",
+        help="Print current calibrated thresholds vs defaults",
+    )
+    p_show.set_defaults(func=cmd_show_calibration)
 
     return parser
 

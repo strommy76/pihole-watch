@@ -1,0 +1,11 @@
+[Unit]
+Description=Run pihole-watch calibration weekly (Sunday 03:30 ET)
+
+[Timer]
+OnCalendar=Sun 03:30:00
+Persistent=true
+RandomizedDelaySec=600
+Unit=pihole-watch-calibrate.service
+
+[Install]
+WantedBy=timers.target

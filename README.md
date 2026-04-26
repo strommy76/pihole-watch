@@ -25,7 +25,8 @@ than chase state-of-the-art ML. There are no model files to maintain.
 | `pihole_watch.dga` | Heuristic DGA score from entropy / length / vowel-ratio / consonant-runs / digits. |
 | `pihole_watch.anomaly` | NXDOMAIN-rate per client; QPS anomaly vs EWMA baseline; baseline updates. |
 | `pihole_watch.beacon` | Periodic-query / C2 beacon detection via inter-arrival CV. |
-| `pihole_watch.findings` | SQLite store: `findings`, `baselines`, `run_log`. |
+| `pihole_watch.findings` | SQLite store: `findings`, `baselines`, `run_log`, `calibration`. |
+| `pihole_watch.calibrate` | Autonomous threshold calibration via ROC analysis + percentile heuristics. |
 | `pihole_watch.main` | systemd-oneshot entry point; orchestrates the four analyses. |
 
 ## Finding types
@@ -152,6 +153,8 @@ Commands:
 | `triage FINDING_ID --outcome O [--note "..."]` | Stamp a finding with `confirmed`/`false_positive`/`ignored`/`pending`. |
 | `summary [--since YYYY-MM-DD]` | Per-detector triage rollup with precision %. Also prints latest Pi-hole snapshot. |
 | `weekly-report` | Markdown summary of the last 7 days. |
+| `calibrate [--lookback-days N --target-fpr F ...]` | Run autonomous threshold calibration now. Updates `calibration` table. |
+| `show-calibration` | Print current calibrated thresholds vs defaults, with last-update time and recent history. |
 
 Examples:
 
@@ -165,6 +168,76 @@ Examples:
 # Weekly markdown report
 ... -m pihole_watch.cli weekly-report > /tmp/pihole-watch-week.md
 ```
+
+## Calibration
+
+Detector thresholds (DGA, NXDOMAIN-rate, beacon CV, volume sigma) drift as
+the user's traffic mix changes. Manual tuning doesn't scale. `pihole-watch`
+includes an autonomous calibration system that re-derives those thresholds
+from the user's own traffic on a weekly cadence.
+
+**How it works.** For the DGA threshold, calibration:
+
+1. Pulls the past 7 days of distinct non-blocked domains from the Pi-hole
+   API as a real-traffic negative corpus (anything the gravity / regex /
+   denylists already block is filtered out — those are known threats and
+   would skew the corpus).
+2. Generates 2,000 synthetic DGA-style domains spanning five malware
+   styles (Conficker, Cryptolocker, Banjori, Necurs, pseudoword) using a
+   deterministic seed.
+3. Scores both corpora with the existing heuristic and computes the
+   ROC curve at thresholds 0.30 → 0.95 in 0.01 steps.
+4. Picks the threshold that meets `target_fpr <= 0.02` while maximising
+   TPR; tie-breaks on the higher (more conservative) threshold. If no
+   threshold hits the FPR target, falls back to the lowest FPR with
+   TPR ≥ 0.5.
+
+The other three knobs are calibrated by simpler percentile heuristics on
+historical data:
+
+- **NXDOMAIN-rate** — 95th percentile of per-client NX rates from the
+  `baselines` table, clamped to `[0.20, 0.50]`.
+- **Beacon CV** — 5th percentile of inter-arrival CV across naturally
+  occurring `(client, domain)` groups from the past 24 h, clamped to
+  `[0.10, 0.20]`. Groups with fewer than 6 query pairs are skipped.
+- **Volume sigma** — 99th percentile of historical `volume_anomaly`
+  deviations, clamped to `[3.0, 10.0]`.
+
+**When it runs.** Weekly via systemd timer (Sunday 03:30 local), or
+on demand:
+
+```bash
+PYTHONPATH=/home/pistrommy/projects \
+  /home/pistrommy/.virtualenvs/pimoroni/bin/python -m pihole_watch.cli calibrate
+```
+
+Install the timer (not auto-installed):
+
+```bash
+sudo cp pihole-watch-calibrate.service /etc/systemd/system/
+sudo cp pihole-watch-calibrate.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now pihole-watch-calibrate.timer
+```
+
+**Where it lives.** Calibration values are stored in the `calibration`
+table; every change is appended to `calibration_history` for drift
+analysis. View the current snapshot:
+
+```bash
+PYTHONPATH=/home/pistrommy/projects \
+  /home/pistrommy/.virtualenvs/pimoroni/bin/python -m pihole_watch.cli show-calibration
+```
+
+**Precedence.** At runtime, `main.py` reads each detector threshold in
+this order:
+
+1. Explicit env override (`WATCH_DGA_THRESHOLD=...` etc) — for testing
+   or manual control.
+2. Calibration table value.
+3. Built-in default.
+
+Removing the env var lets calibration take over for that knob.
 
 ## Grafana setup
 

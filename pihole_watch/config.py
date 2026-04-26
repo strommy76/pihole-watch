@@ -8,6 +8,9 @@ DESCRIPTION: SSOT config loader for pihole-watch. Reads .env via
 CHANGELOG:
 2026-04-25            Claude      [Feature] Initial implementation -- env-driven
                                       config with fail-loud required keys.
+2026-04-26            Claude      [Feature] Add WATCH_VOLUME_SIGMA_THRESHOLD
+                                      so the volume-anomaly detector can be
+                                      tuned alongside the others.
 --------------------------------------------------------------------------------
 """
 
@@ -40,6 +43,7 @@ class WatchConfig:
     beacon_min_occurrences: int
     beacon_max_interval_cv: float
     beacon_lookback_minutes: int
+    volume_sigma_threshold: float
 
 
 def load_config(dotenv_path: str | None = None) -> WatchConfig:
@@ -74,6 +78,9 @@ def load_config(dotenv_path: str | None = None) -> WatchConfig:
         ),
         beacon_lookback_minutes=int(
             get("WATCH_BEACON_LOOKBACK_MIN", "60") or "60"
+        ),
+        volume_sigma_threshold=float(
+            get("WATCH_VOLUME_SIGMA_THRESHOLD", "3.0") or "3.0"
         ),
     )
 
