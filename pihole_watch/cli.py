@@ -36,6 +36,7 @@ sys.path.insert(0, "/home/pistrommy/projects")
 from pihole_watch import findings as findings_db  # noqa: E402
 from pihole_watch.config import load_config, load_dynamic_config  # noqa: E402
 from pihole_watch import calibrate as calibrate_mod  # noqa: E402
+from pihole_watch import triage as triage_mod  # noqa: E402
 
 
 _OUTCOMES: tuple[str, ...] = ("confirmed", "false_positive", "ignored", "pending")
@@ -467,6 +468,39 @@ _CAL_PARAM_TO_CONFIG_KEY: dict[str, str] = {
 }
 
 
+def cmd_triage_run(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
+    """Run LLM triage over pending borderline DGA findings.
+
+    Reads triage settings from cfg.triage; calls Ollama; writes outcomes
+    into findings.triage_outcome. Best-effort: per-finding errors are
+    logged and skipped, the command still exits 0 unless triage is
+    disabled or no candidates exist.
+    """
+    cfg = load_config()
+    if not cfg.triage.enabled:
+        print("triage is disabled in dynamic_config.json (triage.enabled=false)")
+        return 0
+    print(
+        f"Running triage with model={cfg.triage.model} "
+        f"band=[{cfg.triage.score_min:.2f}, {cfg.triage.score_max:.2f}) "
+        f"max_per_run={cfg.triage.max_per_run}"
+    )
+    counts = triage_mod.triage_borderline_findings(
+        conn,
+        ollama_url=cfg.ollama_url,
+        model=cfg.triage.model,
+        score_min=cfg.triage.score_min,
+        score_max=cfg.triage.score_max,
+        max_per_run=cfg.triage.max_per_run,
+        timeout_seconds=cfg.triage.timeout_seconds,
+    )
+    print(
+        f"triage: considered={counts['considered']} "
+        f"classified={counts['classified']} errors={counts['errors']}"
+    )
+    return 0
+
+
 def cmd_show_calibration(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
     """Print the current tuning values (from dynamic_config.json) vs defaults."""
     try:
@@ -556,6 +590,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print current calibrated thresholds vs defaults",
     )
     p_show.set_defaults(func=cmd_show_calibration)
+
+    p_triage = sub.add_parser(
+        "triage-run",
+        help="Run LLM triage over pending borderline DGA findings (uses Ollama)",
+    )
+    p_triage.set_defaults(func=cmd_triage_run)
 
     return parser
 

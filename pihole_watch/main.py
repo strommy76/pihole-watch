@@ -27,6 +27,10 @@ CHANGELOG:
                                       Ollama on loopback. Gated by
                                       cfg.triage.enabled; failures are
                                       logged and never crash the cycle.
+2026-04-26            Claude      [Refactor] Move triage off the 5-min
+                                      hot path. It runs as its own daily
+                                      systemd timer now (cli triage-run).
+                                      Detection cycle returns to ~350ms.
 --------------------------------------------------------------------------------
 """
 
@@ -49,7 +53,9 @@ from pihole_watch.anomaly import (  # noqa: E402
 )
 from pihole_watch.api import PiHoleAPIError, PiHoleClient  # noqa: E402
 from pihole_watch.beacon import detect_beacons  # noqa: E402
-from pihole_watch.config import load_config  # noqa: E402
+from pihole_watch.config import (  # noqa: E402
+    load_config, load_dynamic_config, write_dynamic_config,
+)
 from pihole_watch.dga import dga_score  # noqa: E402
 from pihole_watch import findings as findings_db  # noqa: E402
 from pihole_watch import triage as triage_mod  # noqa: E402
@@ -63,6 +69,26 @@ _BLOCKED_STATUSES: frozenset[str] = frozenset({
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _triage_due(interval_hours: float, last_triage_at: str | None) -> bool:
+    """True if it's time to run triage given the configured interval.
+
+    interval_hours <= 0 means "every cycle" (testing aid). A missing or
+    unparseable last_triage_at counts as never-run, so triage is due.
+    """
+    if interval_hours <= 0:
+        return True
+    if not last_triage_at:
+        return True
+    try:
+        last = datetime.fromisoformat(last_triage_at)
+    except ValueError:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    elapsed = datetime.now(timezone.utc) - last
+    return elapsed.total_seconds() >= interval_hours * 3600.0
 
 
 def _is_blocked(q: dict) -> bool:
@@ -292,28 +318,39 @@ def main() -> int:
         # 6. Update baselines on this short window
         update_baselines(conn, short_queries)
 
-        # 7. Best-effort LLM triage of borderline DGA findings.
-        # Gated by config; never crashes the cycle (errors are logged
-        # and the findings stay 'pending' for a human to review later).
+        # 7. LLM triage -- gated on cfg.triage.interval_hours so the
+        # 5-min hot path stays fast. With interval_hours=24 this fires
+        # roughly 1 in 288 cycles. Best-effort: a failure here logs a
+        # warning and never aborts the cycle.
         if cfg.triage.enabled:
-            try:
-                tcounts = triage_mod.triage_borderline_findings(
-                    conn,
-                    ollama_url=cfg.ollama_url,
-                    model=cfg.triage.model,
-                    score_min=cfg.triage.score_min,
-                    score_max=cfg.triage.score_max,
-                    max_per_cycle=cfg.triage.max_per_cycle,
-                    timeout_seconds=cfg.triage.timeout_seconds,
+            tuning = load_dynamic_config()
+            last_triage_at = (tuning.get("_meta") or {}).get("last_triage_at")
+            if _triage_due(cfg.triage.interval_hours, last_triage_at):
+                logger.info(
+                    "triage due (interval=%.1fh, last=%s); running batch...",
+                    cfg.triage.interval_hours, last_triage_at or "never",
                 )
-                if tcounts["considered"] > 0:
+                try:
+                    tcounts = triage_mod.triage_borderline_findings(
+                        conn,
+                        ollama_url=cfg.ollama_url,
+                        model=cfg.triage.model,
+                        score_min=cfg.triage.score_min,
+                        score_max=cfg.triage.score_max,
+                        max_per_run=cfg.triage.max_per_run,
+                        timeout_seconds=cfg.triage.timeout_seconds,
+                    )
                     logger.info(
                         "triage: considered=%d classified=%d errors=%d",
                         tcounts["considered"], tcounts["classified"],
                         tcounts["errors"],
                     )
-            except Exception as exc:  # noqa: BLE001 -- triage is best-effort
-                logger.warning("triage layer failed (non-fatal): %s", exc)
+                    # Stamp _meta.last_triage_at unconditionally on a
+                    # completed run -- even an empty batch counts as
+                    # "we checked" and resets the interval clock.
+                    write_dynamic_config({}, last_triage_at=_now_iso())
+                except Exception as exc:  # noqa: BLE001 -- best-effort
+                    logger.warning("triage layer failed (non-fatal): %s", exc)
 
     except PiHoleAPIError as exc:
         err_msg = f"PiHoleAPIError: {exc}"

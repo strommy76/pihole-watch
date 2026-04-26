@@ -217,7 +217,7 @@ def triage_borderline_findings(
     model: str,
     score_min: float,
     score_max: float,
-    max_per_cycle: int,
+    max_per_run: int,
     timeout_seconds: float = 90.0,
 ) -> dict[str, int]:
     """Triage pending borderline DGA findings via Ollama.
@@ -231,7 +231,7 @@ def triage_borderline_findings(
     candidates = borderline_pending_findings(
         conn,
         score_min=score_min, score_max=score_max,
-        limit=max_per_cycle,
+        limit=max_per_run,
     )
     counts = {"considered": len(candidates), "classified": 0, "errors": 0}
     if not candidates:

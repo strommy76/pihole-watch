@@ -63,19 +63,26 @@ _TRIAGE_FIELDS: tuple[str, ...] = (
     "model",
     "score_min",
     "score_max",
-    "max_per_cycle",
+    "max_per_run",
+    "interval_hours",
     "timeout_seconds",
 )
 
 
 @dataclass(frozen=True)
 class TriageConfig:
-    """Local-LLM triage layer settings."""
+    """Local-LLM triage layer settings.
+
+    interval_hours is the cadence: triage runs at most once per
+    interval_hours, gated against _meta.last_triage_at. Setting it to
+    0 means "every cycle" (useful for testing); 24 is daily.
+    """
     enabled: bool
     model: str
     score_min: float
     score_max: float
-    max_per_cycle: int
+    max_per_run: int
+    interval_hours: float
     timeout_seconds: float
 
 
@@ -136,12 +143,15 @@ def write_dynamic_config(
     path: str | None = None,
     *,
     last_calibrated_at: str | None = None,
+    last_triage_at: str | None = None,
 ) -> dict[str, Any]:
     """Atomically merge ``updates`` into dynamic_config.json.
 
     Reads current JSON, merges in ``updates`` (only known tunable keys are
     accepted), writes via temp file + os.replace for crash safety. Updates
-    ``_meta.last_calibrated_at`` if provided.
+    ``_meta.last_calibrated_at`` and/or ``_meta.last_triage_at`` if
+    provided -- these are operation timestamps that piggyback on the
+    config file (not tuning values, but precedented by last_calibrated_at).
 
     Returns the new config dict (the version actually written to disk).
     Raises ConfigError on unknown keys or write failure.
@@ -170,11 +180,12 @@ def write_dynamic_config(
         )
 
     current.update(updates)
-    if last_calibrated_at is not None:
-        meta = current.setdefault("_meta", {})
-        if isinstance(meta, dict):
+    meta = current.setdefault("_meta", {})
+    if isinstance(meta, dict):
+        if last_calibrated_at is not None:
             meta["last_calibrated_at"] = last_calibrated_at
-
+        if last_triage_at is not None:
+            meta["last_triage_at"] = last_triage_at
     # Atomic write: tempfile in same dir, then os.replace.
     parent = os.path.dirname(os.path.abspath(p)) or "."
     fd, tmp = tempfile.mkstemp(prefix=".dynamic_config.", suffix=".tmp", dir=parent)
@@ -227,7 +238,8 @@ def load_config(
         model=str(triage_raw["model"]),
         score_min=float(triage_raw["score_min"]),
         score_max=float(triage_raw["score_max"]),
-        max_per_cycle=int(triage_raw["max_per_cycle"]),
+        max_per_run=int(triage_raw["max_per_run"]),
+        interval_hours=float(triage_raw["interval_hours"]),
         timeout_seconds=float(triage_raw["timeout_seconds"]),
     )
 
