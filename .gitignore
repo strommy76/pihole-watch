@@ -1,0 +1,9 @@
+.env
+findings.db
+findings.db-shm
+findings.db-wal
+watch.log
+watch.log.*
+__pycache__/
+*.pyc
+.pytest_cache/

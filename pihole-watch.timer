@@ -1,0 +1,10 @@
+[Unit]
+Description=Run pihole-watch every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=pihole-watch.service
+
+[Install]
+WantedBy=timers.target
