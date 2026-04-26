@@ -8,7 +8,7 @@ User=pistrommy
 WorkingDirectory=/home/pistrommy/projects/pihole-watch
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/home/pistrommy/projects
-ExecStart=/home/pistrommy/.virtualenvs/pimoroni/bin/python -m pihole_watch.main
+ExecStart=/home/pistrommy/projects/pihole-watch/.venv/bin/python -m pihole_watch.main
 
 [Install]
 WantedBy=multi-user.target
