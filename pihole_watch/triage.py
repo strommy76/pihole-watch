@@ -263,7 +263,10 @@ def triage_borderline_findings(
 
         note = f"[{model}] {result['classification']}: {result['rationale']}"
         try:
-            findings_db.triage_finding(conn, c["id"], outcome, note=note)
+            findings_db.triage_finding(
+                conn, c["id"], outcome, note=note,
+                source="ai", model=model,
+            )
         except ValueError as exc:
             log.warning(
                 "triage DB write failed for finding #%d: %s", c["id"], exc,

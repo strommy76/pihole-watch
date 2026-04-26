@@ -3,15 +3,16 @@
     "path": "~/projects/pihole-watch/grafana/pihole-watch.json",
     "description": "pihole-watch — Pi-hole telemetry timeline + ML threat findings + triage lifecycle. SQLite-backed via frser-sqlite-datasource (uid pihole-watch-sqlite-ds).",
     "changelog": [
-      "2026-04-25 — Initial creation: 13 panels covering snapshot timeline, findings, triage, run health"
+      "2026-04-25 — Initial creation: 13 panels covering snapshot timeline, findings, triage, run health",
+      "2026-04-26 — Add AI triage effectiveness section: agreement rate, confirmations, corrections, verdict distribution, recent AI events (8 new panels)"
     ]
   },
   "uid": "pihole-watch-dash",
   "title": "pihole-watch — Threat Findings & Pi-hole Timeline",
-  "tags": ["pihole", "security", "watch"],
+  "tags": ["pihole", "security", "watch", "ai", "llm"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "5m",
   "time": {"from": "now-7d", "to": "now"},
   "fiscalYearStartMonth": 0,
@@ -370,6 +371,143 @@
           "queryType": "time series",
           "rawQueryText": "SELECT CAST(strftime('%s', date(detected_at, 'weekday 0', '-6 days')) AS INTEGER) AS time, finding_type, CAST(SUM(CASE WHEN triage_outcome='confirmed' THEN 1 ELSE 0 END) AS REAL) / NULLIF(SUM(CASE WHEN triage_outcome IN ('confirmed','false_positive') THEN 1 ELSE 0 END), 0) * 100 AS precision_pct FROM findings GROUP BY date(detected_at, 'weekday 0', '-6 days'), finding_type ORDER BY time",
           "timeColumns": ["time"],
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "🧠 AI triage effectiveness",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 67},
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "AI triages (last 7d)",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 68},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "purple"}]}}},
+      "options": {"colorMode": "background", "graphMode": "area", "textMode": "auto"},
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "SELECT COUNT(*) AS value FROM triage_log WHERE source='ai' AND triaged_at >= datetime('now','-7 day')",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "AI ↔ human agreement",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 68},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "red"}, {"value": 60, "color": "orange"}, {"value": 80, "color": "green"}]}}},
+      "options": {"colorMode": "background", "graphMode": "none", "textMode": "auto"},
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "WITH paired AS (SELECT finding_id, MAX(CASE WHEN source='ai' THEN outcome END) AS ai_v, MAX(CASE WHEN source='human' THEN outcome END) AS human_v FROM triage_log GROUP BY finding_id HAVING ai_v IS NOT NULL AND human_v IS NOT NULL) SELECT CAST(SUM(CASE WHEN ai_v=human_v THEN 1 ELSE 0 END) AS REAL) / NULLIF(COUNT(*),0) * 100 AS value FROM paired",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "AI confirmations",
+      "description": "Findings where the LLM verdict was later confirmed by a human (or never overturned).",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 68},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}}},
+      "options": {"colorMode": "background", "graphMode": "none", "textMode": "auto"},
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "WITH paired AS (SELECT finding_id, MAX(CASE WHEN source='ai' THEN outcome END) AS ai_v, MAX(CASE WHEN source='human' THEN outcome END) AS human_v FROM triage_log GROUP BY finding_id HAVING ai_v IS NOT NULL) SELECT SUM(CASE WHEN human_v IS NULL OR human_v = ai_v THEN 1 ELSE 0 END) AS value FROM paired",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "AI corrections",
+      "description": "Findings where a human overturned the LLM verdict. Lower is better.",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 68},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}, {"value": 1, "color": "orange"}, {"value": 5, "color": "red"}]}}},
+      "options": {"colorMode": "background", "graphMode": "none", "textMode": "auto"},
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "WITH paired AS (SELECT finding_id, MAX(CASE WHEN source='ai' THEN outcome END) AS ai_v, MAX(CASE WHEN source='human' THEN outcome END) AS human_v FROM triage_log GROUP BY finding_id HAVING ai_v IS NOT NULL AND human_v IS NOT NULL) SELECT SUM(CASE WHEN ai_v != human_v THEN 1 ELSE 0 END) AS value FROM paired",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Triage events per day (AI vs human)",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 73},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "bars", "fillOpacity": 70, "stacking": {"mode": "normal"}}}},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}},
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "time series",
+          "rawQueryText": "SELECT CAST(strftime('%s', date(triaged_at)) AS INTEGER) AS time, source, COUNT(*) AS events FROM triage_log GROUP BY date(triaged_at), source ORDER BY time",
+          "timeColumns": ["time"],
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "barchart",
+      "title": "AI verdict distribution (last 7d)",
+      "description": "What the LLM is saying — confirmed = real DGA, false_positive = legit cloud/CDN.",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 80},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}},
+      "options": {"legend": {"showLegend": true, "placement": "bottom"}, "xField": "outcome"},
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "SELECT outcome, COUNT(*) AS count FROM triage_log WHERE source='ai' AND triaged_at >= datetime('now','-7 day') GROUP BY outcome ORDER BY count DESC",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "AI corrections (where human overturned the LLM)",
+      "description": "Each row is a finding the LLM verdict was later overturned on. Use this to spot model weaknesses and tune the borderline band.",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 80},
+      "options": {"showHeader": true},
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "WITH paired AS (SELECT finding_id, MAX(CASE WHEN source='ai' THEN outcome END) AS ai_v, MAX(CASE WHEN source='ai' THEN model END) AS ai_model, MAX(CASE WHEN source='ai' THEN note END) AS ai_note, MAX(CASE WHEN source='human' THEN outcome END) AS human_v, MAX(CASE WHEN source='human' THEN note END) AS human_note, MAX(CASE WHEN source='human' THEN triaged_at END) AS human_at FROM triage_log GROUP BY finding_id HAVING ai_v IS NOT NULL AND human_v IS NOT NULL AND ai_v != human_v) SELECT p.finding_id AS id, f.domain, ROUND(f.score,2) AS score, p.ai_v AS ai, p.human_v AS human, p.ai_model AS model, p.ai_note, p.human_note, p.human_at FROM paired p JOIN findings f ON f.id = p.finding_id ORDER BY p.human_at DESC LIMIT 25",
+          "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Recent AI triage events (last 25)",
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 88},
+      "options": {"showHeader": true},
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "table",
+          "rawQueryText": "SELECT t.triaged_at, t.finding_id AS id, f.domain, ROUND(f.score,2) AS score, t.outcome, t.model, substr(t.note, instr(t.note, ']') + 2) AS rationale FROM triage_log t JOIN findings f ON f.id = t.finding_id WHERE t.source = 'ai' ORDER BY t.id DESC LIMIT 25",
           "datasource": {"type": "frser-sqlite-datasource", "uid": "pihole-watch-sqlite-ds"}
         }
       ]

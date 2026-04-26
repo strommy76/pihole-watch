@@ -95,6 +95,24 @@ CREATE TABLE IF NOT EXISTS calibration_history (
 );
 CREATE INDEX IF NOT EXISTS idx_calibration_history_param
     ON calibration_history(parameter, calibrated_at);
+
+-- Per-event triage audit trail. findings.triage_outcome holds the
+-- LATEST verdict (mutable); this table records every triage event so
+-- AI vs human disagreement can be analysed (corrections, confirmations,
+-- agreement rate per detector). Append-only.
+CREATE TABLE IF NOT EXISTS triage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    finding_id INTEGER NOT NULL,
+    triaged_at TEXT NOT NULL,
+    source TEXT NOT NULL CHECK(source IN ('ai','human')),
+    model TEXT,
+    outcome TEXT NOT NULL CHECK(outcome IN ('confirmed','false_positive','ignored','pending')),
+    note TEXT,
+    FOREIGN KEY(finding_id) REFERENCES findings(id)
+);
+CREATE INDEX IF NOT EXISTS idx_triage_log_finding ON triage_log(finding_id);
+CREATE INDEX IF NOT EXISTS idx_triage_log_at ON triage_log(triaged_at);
+CREATE INDEX IF NOT EXISTS idx_triage_log_source ON triage_log(source);
 """
 
 
@@ -153,6 +171,36 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if has_calibration is not None:
         conn.execute("DROP TABLE calibration")
+
+    # Migration: backfill triage_log from existing triaged findings.
+    # The previous data model had triage_outcome on findings but no event
+    # log. Reconstruct one row per already-triaged finding by parsing the
+    # note. AI events have notes like "[qwen3:4b] dga: rationale";
+    # everything else is treated as a human triage.
+    log_count = conn.execute(
+        "SELECT COUNT(*) FROM triage_log"
+    ).fetchone()[0]
+    if log_count == 0:
+        rows = conn.execute(
+            "SELECT id, triaged_at, triage_outcome, triage_note FROM findings "
+            "WHERE triaged_at IS NOT NULL AND triage_outcome IS NOT NULL "
+            "  AND triage_outcome != 'pending'"
+        ).fetchall()
+        for r in rows:
+            note = r["triage_note"] or ""
+            if note.startswith("[") and "]" in note:
+                model = note[1:note.index("]")]
+                source = "ai"
+            else:
+                model = None
+                source = "human"
+            conn.execute(
+                "INSERT INTO triage_log "
+                "(finding_id, triaged_at, source, model, outcome, note) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (r["id"], r["triaged_at"], source, model,
+                 r["triage_outcome"], note or None),
+            )
 
 
 # -- findings ----------------------------------------------------------------
@@ -214,30 +262,69 @@ def triage_finding(
     finding_id: int,
     outcome: str,
     note: str | None = None,
+    *,
+    source: str = "human",
+    model: str | None = None,
 ) -> dict[str, Any]:
-    """Mark a finding with a triage outcome. Returns the updated row as dict.
+    """Mark a finding with a triage outcome AND append to triage_log.
+
+    findings.triage_{outcome,note,at} hold the latest verdict (mutable).
+    triage_log records every event so AI/human disagreement is queryable
+    after the fact (corrections, confirmations, agreement rate).
+
+    Args:
+        source: 'ai' or 'human'. The CLI defaults to human; the LLM
+            triage layer passes 'ai'.
+        model: model name when source='ai' (e.g. 'qwen3:4b'). None for human.
 
     Raises:
-        ValueError: outcome not in the valid set or finding_id not found.
+        ValueError: outcome not in the valid set, finding_id not found,
+            or source not in {'ai','human'}.
     """
     if outcome not in _VALID_TRIAGE_OUTCOMES:
         raise ValueError(
             f"triage outcome {outcome!r} not in {sorted(_VALID_TRIAGE_OUTCOMES)}"
         )
+    if source not in ("ai", "human"):
+        raise ValueError(f"source {source!r} not in ('ai','human')")
     triaged_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    cur = conn.execute(
-        """UPDATE findings
-           SET triaged_at = ?, triage_outcome = ?, triage_note = ?
-           WHERE id = ?""",
-        (triaged_at, outcome, note, int(finding_id)),
-    )
-    if cur.rowcount == 0:
-        raise ValueError(f"finding id {finding_id} not found")
-    conn.commit()
+    try:
+        with conn:
+            cur = conn.execute(
+                """UPDATE findings
+                   SET triaged_at = ?, triage_outcome = ?, triage_note = ?
+                   WHERE id = ?""",
+                (triaged_at, outcome, note, int(finding_id)),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"finding id {finding_id} not found")
+            conn.execute(
+                "INSERT INTO triage_log "
+                "(finding_id, triaged_at, source, model, outcome, note) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (int(finding_id), triaged_at, source, model, outcome, note),
+            )
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"triage write failed: {exc}") from exc
+
     row = conn.execute(
         "SELECT * FROM findings WHERE id = ?", (int(finding_id),)
     ).fetchone()
     return dict(row) if row is not None else {}
+
+
+def triage_log_for_finding(
+    conn: sqlite3.Connection, finding_id: int,
+) -> list[dict[str, Any]]:
+    """Return every triage event for ``finding_id`` (oldest first)."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM triage_log WHERE finding_id = ? "
+            "ORDER BY triaged_at ASC, id ASC",
+            (int(finding_id),),
+        )
+    ]
 
 
 def findings_by_outcome(
@@ -546,4 +633,5 @@ __all__ = [
     "snapshots_since",
     "record_calibration_event",
     "calibration_history",
+    "triage_log_for_finding",
 ]

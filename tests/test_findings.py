@@ -44,6 +44,7 @@ def test_schema_creates_expected_tables(db) -> None:
         "findings",
         "pihole_snapshots",
         "run_log",
+        "triage_log",
     ]
 
 
@@ -338,6 +339,102 @@ def test_triage_summary_per_detector(db) -> None:
     assert summary["beacon"] == {
         "confirmed": 0, "false_positive": 0, "ignored": 1, "pending": 1
     }
+
+
+# --- triage_log audit trail ------------------------------------------------
+
+
+def test_triage_finding_appends_to_log(db) -> None:
+    fid = findings_db.record_finding(
+        db, finding_type="dga", severity="medium", client_ip="10.0.0.5",
+        domain="example.com", score=0.78,
+    )
+    findings_db.triage_finding(
+        db, fid, "false_positive", note="[qwen3:4b] legitimate: known CDN",
+        source="ai", model="qwen3:4b",
+    )
+    log = findings_db.triage_log_for_finding(db, fid)
+    assert len(log) == 1
+    assert log[0]["source"] == "ai"
+    assert log[0]["model"] == "qwen3:4b"
+    assert log[0]["outcome"] == "false_positive"
+    # Override by a human now
+    findings_db.triage_finding(
+        db, fid, "confirmed", note="actually a DGA we cleared too quickly",
+    )
+    log = findings_db.triage_log_for_finding(db, fid)
+    assert len(log) == 2
+    assert log[1]["source"] == "human"
+    assert log[1]["model"] is None
+    assert log[1]["outcome"] == "confirmed"
+    # findings.triage_outcome reflects the LATEST verdict (mutable)
+    row = db.execute("SELECT triage_outcome FROM findings WHERE id=?", (fid,)).fetchone()
+    assert row["triage_outcome"] == "confirmed"
+
+
+def test_triage_finding_invalid_source(db) -> None:
+    fid = findings_db.record_finding(
+        db, finding_type="dga", severity="low", client_ip="10.0.0.6",
+        domain="x.com", score=0.7,
+    )
+    with pytest.raises(ValueError):
+        findings_db.triage_finding(db, fid, "confirmed", source="robot")
+
+
+def test_triage_log_backfill_from_legacy_data(tmp_path) -> None:
+    """A DB that pre-dates triage_log gets backfilled on first connect."""
+    path = str(tmp_path / "legacy.db")
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        """
+        CREATE TABLE findings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            detected_at TEXT NOT NULL,
+            finding_type TEXT NOT NULL CHECK(finding_type IN ('dga','nxdomain_spike','volume_anomaly','beacon')),
+            severity TEXT NOT NULL CHECK(severity IN ('info','low','medium','high')),
+            client_ip TEXT NOT NULL,
+            domain TEXT,
+            score REAL,
+            details TEXT,
+            sample_queries TEXT,
+            triaged_at TEXT,
+            triage_outcome TEXT DEFAULT 'pending',
+            triage_note TEXT
+        );
+        """
+    )
+    # Two pre-triaged findings: one AI-tagged note, one human-tagged.
+    raw.execute(
+        "INSERT INTO findings(detected_at, finding_type, severity, client_ip, "
+        "domain, score, triaged_at, triage_outcome, triage_note) "
+        "VALUES ('2026-04-26T00:00:00+00:00','dga','low','10.0.0.1','x.com',"
+        "0.7,'2026-04-26T01:00:00+00:00','false_positive',"
+        "'[qwen3:4b] legitimate: cdn')"
+    )
+    raw.execute(
+        "INSERT INTO findings(detected_at, finding_type, severity, client_ip, "
+        "domain, score, triaged_at, triage_outcome, triage_note) "
+        "VALUES ('2026-04-26T00:00:00+00:00','dga','low','10.0.0.2','y.com',"
+        "0.8,'2026-04-26T02:00:00+00:00','confirmed','manual triage by op')"
+    )
+    raw.commit()
+    raw.close()
+
+    conn = findings_db.connect(path)
+    try:
+        rows = list(conn.execute(
+            "SELECT finding_id, source, model, outcome FROM triage_log ORDER BY id"
+        ))
+        assert len(rows) == 2
+        assert rows[0]["source"] == "ai" and rows[0]["model"] == "qwen3:4b"
+        assert rows[1]["source"] == "human" and rows[1]["model"] is None
+        # Re-connect: backfill must NOT re-run (idempotent)
+        conn.close()
+        conn = findings_db.connect(path)
+        n = conn.execute("SELECT COUNT(*) FROM triage_log").fetchone()[0]
+        assert n == 2
+    finally:
+        conn.close()
 
 
 # --- migration safety ------------------------------------------------------
