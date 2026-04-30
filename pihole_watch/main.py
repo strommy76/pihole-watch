@@ -47,10 +47,12 @@ sys.path.insert(0, "/home/pistrommy/projects")
 from shared.logging_service import setup_logger  # noqa: E402
 
 from pihole_watch.anomaly import (  # noqa: E402
+    filter_infrastructure_clients,
     nxdomain_rate_per_client,
     query_volume_anomalies,
     update_baselines,
 )
+from pihole_watch.discovery import resolve_infrastructure_clients  # noqa: E402
 from pihole_watch.api import PiHoleAPIError, PiHoleClient  # noqa: E402
 from pihole_watch.beacon import detect_beacons  # noqa: E402
 from pihole_watch.config import (  # noqa: E402
@@ -224,8 +226,23 @@ def main() -> int:
                 dga_findings += 1
         findings_emitted += dga_findings
 
-        # 3. NXDOMAIN spike per client (short window)
-        nx_by_client = nxdomain_rate_per_client(short_queries)
+        # 3. NXDOMAIN spike per client (short window). Strip infrastructure
+        # clients (Docker bridge gateways etc.) — they aggregate container
+        # traffic and false-positive on per-client analyses. The set is
+        # the union of (a) auto-discovered Docker bridge gateways and
+        # (b) the operator's manual escape-hatch list from config. DGA
+        # above is per-domain so it sees the full query stream; only
+        # the per-client detectors filter.
+        infrastructure_clients = resolve_infrastructure_clients(
+            cfg.infrastructure_clients_extra,
+        )
+        endpoint_short = filter_infrastructure_clients(
+            short_queries, infrastructure_clients,
+        )
+        endpoint_beacon = filter_infrastructure_clients(
+            beacon_queries, infrastructure_clients,
+        )
+        nx_by_client = nxdomain_rate_per_client(endpoint_short)
         nx_findings = 0
         for ip, stats in nx_by_client.items():
             if stats["total"] < 20:
@@ -254,10 +271,10 @@ def main() -> int:
             nx_findings += 1
         findings_emitted += nx_findings
 
-        # 4. Volume anomaly vs baseline
+        # 4. Volume anomaly vs baseline (infrastructure clients filtered)
         baselines = findings_db.all_baseline_qps(conn)
         volume_findings = query_volume_anomalies(
-            short_queries,
+            endpoint_short,
             baselines,
             window_seconds=cfg.lookback_minutes * 60.0,
             sigma_threshold=cfg.volume_sigma_threshold,
@@ -283,9 +300,9 @@ def main() -> int:
             )
         findings_emitted += len(volume_findings)
 
-        # 5. Beacon detection on the longer window
+        # 5. Beacon detection on the longer window (infrastructure-filtered)
         beacon_findings_list = detect_beacons(
-            beacon_queries,
+            endpoint_beacon,
             min_occurrences=cfg.beacon_min_occurrences,
             max_cv=cfg.beacon_max_interval_cv,
             lookback_minutes=cfg.beacon_lookback_minutes,
@@ -315,8 +332,9 @@ def main() -> int:
             )
         findings_emitted += len(beacon_findings_list)
 
-        # 6. Update baselines on this short window
-        update_baselines(conn, short_queries)
+        # 6. Update baselines on this short window (infrastructure-filtered
+        # so gateway IPs don't accumulate poisoned baselines)
+        update_baselines(conn, endpoint_short)
 
         # 7. LLM triage -- gated on cfg.triage.interval_hours so the
         # 5-min hot path stays fast. With interval_hours=24 this fires

@@ -6,6 +6,12 @@ DESCRIPTION: Per-client behavior anomalies -- NXDOMAIN rates, query-volume
              anomalies vs EWMA baseline, and baseline updates.
 
 CHANGELOG:
+2026-04-30            Claude      [Feature] Add filter_infrastructure_clients
+                                      helper. Strips queries whose client_ip
+                                      is in a configured infrastructure set
+                                      (Docker bridge gateways etc.) so per-
+                                      client analyses don't false-positive
+                                      on aggregated container traffic.
 2026-04-25            Claude      [Feature] Initial implementation.
 --------------------------------------------------------------------------------
 """
@@ -27,6 +33,30 @@ def _client_ip(q: dict) -> str | None:
     client = q.get("client") or {}
     ip = client.get("ip")
     return ip if isinstance(ip, str) and ip else None
+
+
+def filter_infrastructure_clients(
+    queries: list[dict], infrastructure_clients: frozenset[str] | set[str],
+) -> list[dict]:
+    """Return ``queries`` with records whose client_ip is in
+    ``infrastructure_clients`` removed.
+
+    Used to strip Docker bridge gateway IPs (e.g. 172.19.0.1) and other
+    infrastructure clients from per-client analyses (volume anomaly,
+    NXDOMAIN rate, beacon, baseline updates). These IPs aggregate
+    traffic from many containers and produce false-positive anomalies
+    that don't reflect real endpoint behavior.
+
+    DGA detection is per-domain (not per-client) so the full query stream
+    is still passed to it; this filter is only applied to per-client
+    detectors. Snapshot/total counts also bypass this filter so the
+    dashboard's "total queries" reflects the true Pi-hole load.
+
+    No-op when ``infrastructure_clients`` is empty.
+    """
+    if not infrastructure_clients:
+        return queries
+    return [q for q in queries if _client_ip(q) not in infrastructure_clients]
 
 
 def _is_nxdomain(q: dict) -> bool:
@@ -186,6 +216,7 @@ def update_baselines(findings_conn, queries: list[dict]) -> None:
 
 
 __all__ = [
+    "filter_infrastructure_clients",
     "nxdomain_rate_per_client",
     "query_volume_anomalies",
     "update_baselines",
