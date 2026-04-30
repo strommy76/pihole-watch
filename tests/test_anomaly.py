@@ -7,6 +7,7 @@ import tempfile
 
 from pihole_watch import findings as findings_db
 from pihole_watch.anomaly import (
+    filter_infrastructure_clients,
     nxdomain_rate_per_client,
     query_volume_anomalies,
     update_baselines,
@@ -154,3 +155,56 @@ def test_volume_anomaly_severity_levels() -> None:
         qs, {"10.0.0.7": 0.05}, window_seconds=60.0, sigma_threshold=3.0
     )
     assert out and out[0]["severity"] == "high"
+
+
+# --- filter_infrastructure_clients (Docker bridge gateway exclusion) -----
+
+
+def test_filter_infrastructure_clients_drops_matching_ips() -> None:
+    """Queries from configured infrastructure IPs are stripped; everything
+    else passes through unchanged."""
+    queries = [
+        _q(1, "172.19.0.1"),    # Docker bridge gateway — drop
+        _q(2, "10.0.0.5"),      # real endpoint — keep
+        _q(3, "172.17.0.1"),    # Docker bridge gateway — drop
+        _q(4, "192.168.1.42"),  # real endpoint — keep
+    ]
+    out = filter_infrastructure_clients(
+        queries, frozenset({"172.17.0.1", "172.19.0.1"}),
+    )
+    assert len(out) == 2
+    assert {q["client"]["ip"] for q in out} == {"10.0.0.5", "192.168.1.42"}
+
+
+def test_filter_infrastructure_clients_empty_set_is_noop() -> None:
+    """Empty infrastructure set → returns the input list unchanged."""
+    queries = [_q(1, "172.19.0.1"), _q(2, "10.0.0.5")]
+    out = filter_infrastructure_clients(queries, frozenset())
+    assert out is queries  # identity, not just equality — no-op
+
+
+def test_filter_infrastructure_clients_handles_missing_client_field() -> None:
+    """Records without a client.ip don't crash the filter — they pass
+    through (downstream per-client analyses already skip them)."""
+    queries = [
+        _q(1, "172.19.0.1"),
+        {"id": 2, "time": 1700000000.0, "type": "A", "status": "FORWARDED",
+         "domain": "anon.example", "reply": {"type": "IP", "time": 0.0}},
+    ]
+    out = filter_infrastructure_clients(queries, frozenset({"172.19.0.1"}))
+    assert len(out) == 1
+    assert out[0]["id"] == 2
+
+
+def test_volume_anomaly_with_filter_skips_gateway() -> None:
+    """End-to-end: a gateway IP that would otherwise produce a high-sigma
+    volume anomaly is silently filtered out."""
+    qs = [_q(i, "172.19.0.1", t=1700000000.0 + i * 0.1) for i in range(600)]
+    qs += [_q(700, "10.0.0.5", t=1700000000.5)]  # one real endpoint query
+    filtered = filter_infrastructure_clients(qs, frozenset({"172.19.0.1"}))
+    out = query_volume_anomalies(
+        filtered, {"172.19.0.1": 0.05, "10.0.0.5": 1.0},
+        window_seconds=60.0, sigma_threshold=3.0,
+    )
+    # 172.19.0.1 should not appear in findings — it was filtered upstream.
+    assert all(f["client_ip"] != "172.19.0.1" for f in out)

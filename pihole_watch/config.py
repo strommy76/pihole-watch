@@ -16,15 +16,21 @@ DESCRIPTION: Two-layer config loader for pihole-watch.
   threshold evolution; this file is the current-values SSOT.
 
 CHANGELOG:
-2026-04-25            Claude      [Feature] Initial implementation -- env-driven
-                                      config with fail-loud required keys.
-2026-04-26            Claude      [Feature] Add WATCH_VOLUME_SIGMA_THRESHOLD
-                                      so the volume-anomaly detector can be
-                                      tuned alongside the others.
+2026-04-30            Claude      [Feature] Add infrastructure_clients --
+                                      list of IPs (Docker bridge gateways,
+                                      etc.) excluded from per-client
+                                      analyses (volume_anomaly, nxdomain,
+                                      beacon, baselines). DGA detection is
+                                      per-domain and unaffected.
 2026-04-26            Claude      [Refactor] Split config: .env keeps only
                                       secrets/paths; tuning moves to
                                       dynamic_config.json. Adds atomic-write
                                       helper used by the calibrator.
+2026-04-26            Claude      [Feature] Add WATCH_VOLUME_SIGMA_THRESHOLD
+                                      so the volume-anomaly detector can be
+                                      tuned alongside the others.
+2026-04-25            Claude      [Feature] Initial implementation -- env-driven
+                                      config with fail-loud required keys.
 --------------------------------------------------------------------------------
 """
 
@@ -56,6 +62,7 @@ _TUNABLE_FIELDS: tuple[str, ...] = (
     "nxdomain_rate_threshold",
     "beacon_max_interval_cv",
     "volume_sigma_threshold",
+    "infrastructure_clients_extra",
 )
 
 _TRIAGE_FIELDS: tuple[str, ...] = (
@@ -107,6 +114,12 @@ class WatchConfig:
     beacon_max_interval_cv: float
     beacon_lookback_minutes: int
     volume_sigma_threshold: float
+    # Manual escape hatch for infrastructure IPs that auto-discovery
+    # can't see — typically empty. Docker bridge gateways are discovered
+    # at runtime (see pihole_watch.discovery.discover_docker_bridge_gateways);
+    # use this list only for non-Docker infrastructure that needs the same
+    # exclusion treatment (router IPs, smart-home hubs, etc.).
+    infrastructure_clients_extra: frozenset[str]
     triage: TriageConfig
 
 
@@ -243,6 +256,14 @@ def load_config(
         timeout_seconds=float(triage_raw["timeout_seconds"]),
     )
 
+    infra_raw = tuning["infrastructure_clients_extra"]
+    if not isinstance(infra_raw, list):
+        raise ConfigError(
+            f"dynamic_config.json infrastructure_clients_extra must be a list "
+            f"(got {type(infra_raw).__name__})"
+        )
+    infrastructure_clients_extra = frozenset(str(ip) for ip in infra_raw)
+
     return WatchConfig(
         pihole_url=get("PIHOLE_URL", "http://localhost:8080") or "http://localhost:8080",
         pihole_password=require("PIHOLE_PASSWORD"),
@@ -258,6 +279,7 @@ def load_config(
         beacon_max_interval_cv=float(tuning["beacon_max_interval_cv"]),
         beacon_lookback_minutes=int(tuning["beacon_lookback_minutes"]),
         volume_sigma_threshold=float(tuning["volume_sigma_threshold"]),
+        infrastructure_clients_extra=infrastructure_clients_extra,
         triage=triage,
     )
 

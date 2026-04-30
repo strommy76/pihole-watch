@@ -433,6 +433,7 @@ def _seed_dynamic_config(path: str) -> None:
             "nxdomain_rate_threshold": 0.30,
             "beacon_max_interval_cv": 0.15,
             "volume_sigma_threshold": 3.0,
+            "infrastructure_clients_extra": [],
         }, fh)
 
 
