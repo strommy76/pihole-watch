@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 findings.db
 findings.db-shm
 findings.db-wal
