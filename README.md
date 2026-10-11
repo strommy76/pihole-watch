@@ -58,7 +58,7 @@ Three storage layers, each with one job. **Config is config; data is data.**
 ```mermaid
 flowchart LR
     PH[("📡 Pi-hole<br/>FTL API")] -->|"HTTP GET<br/>/api/queries"| PW
-    PW["🛡️ pihole-watch<br/>(systemd oneshot,<br/>5 min)"] -->|writes findings| DB[("🗃️ findings.db<br/>SQLite + WAL")]
+    PW["🛡️ pihole-watch<br/>(systemd oneshot,<br/>5 min)"] -->|writes findings| DB[("🗃️ findings.db<br/>SQLite rollback journal")]
     PW -.reads.-> ENV[".env<br/>secrets + paths"]
     PW -.reads.-> CFG["⚙️ dynamic_config.json<br/>tuning (SSOT)"]
     PW <-->|"borderline DGA<br/>(daily, gated)"| OL[("🧠 Ollama<br/>qwen3:4b<br/>loopback only")]
@@ -450,9 +450,10 @@ datasources:
       path: /var/lib/pihole-watch/findings.db
 ```
 
-**2. Volume mount** — Grafana needs read access to `findings.db`. SQLite
-WAL mode also writes `findings.db-wal` / `findings.db-shm` alongside, so
-mount the whole directory **read-only**:
+**2. Volume mount** — Grafana needs read access to `findings.db`. The store
+owner selects SQLite rollback journaling (`DELETE`), so reads between producer
+runs do not depend on WAL sidecars that vanish when the last connection closes.
+Mount the directory **read-only**; Grafana is not a writer or recovery owner:
 
 ```yaml
 services:
@@ -465,6 +466,10 @@ services:
 provisioning dashboards directory; reload Grafana.
 
 The dashboard refreshes every 5 minutes — same cadence as the watcher.
+The producer owns journal recovery; native query/locking errors remain errors.
+For an existing WAL deployment, quiesce connections for the native journal
+conversion and verify the returned mode without deleting journal files or
+replacing the database. See [the measured owner/reader contract](docs/sqlite-grafana-read-contract.md).
 
 ---
 
