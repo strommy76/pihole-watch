@@ -100,7 +100,9 @@ Method: generate targets from every actual owner dashboard panel. The plugin's
 installed frontend `applyTemplateVariables` assigns native backend `queryText`
 from `rawQueryText`; no owner SQL contains template variables, so use the exact
 SQL unchanged in that required API field. Send each target to `/api/ds/query`
-with the owner's six-hour range, one concurrent reader per actual target (21):
+with a six-hour request range, one concurrent reader per actual target (21).
+The owner dashboard actually declares seven days; all 21 SQL strings ignore
+request-range variables, so this discrepancy does not alter the SQL workload.
 
 1. Apply owner schema to an isolated copy; select candidate mode through native
    SQLite and close the writer before starting the reader.
@@ -133,7 +135,7 @@ Valid paired fixture comparison (12:32 EDT, current-sized consistent input):
 | Reader restarted | 21/21 | 0/21 |
 
 WAL succeeds only after actual writes create coordination files in this
-observation; reopening a connection alone is insufficient. DELETE overlap query
+observation; reopening a connection alone is insufficient. DELETE scheduled-burst query
 median/max: 77.3/390.8 ms; DAO commit median/max: 0.057/7.860 ms. WAL overlap
 query median/max: 157.0/680.7 ms, commit median/max: 0.026/6.086 ms. One paired
 observation is not statistical evidence of general throughput superiority, nor
@@ -160,7 +162,10 @@ unique database records. Actual corrected overlap query median/max:
 62.4/405.9 ms; cold maximum 640.4 ms; restarted maximum 463.0 ms.
 Actual DAO commit median/max: 0.068/1.477 ms. These measured nominal operations
 fit the existing five-minute collection/refresh cadence with no added budget.
-No evidence from this current workload justifies a larger WAL mechanism.
+These first bursts establish scheduling concurrency, not database-level overlap:
+the start event precedes request-worker creation. They do not establish absence
+of contention. The review-directed follow-up below supplies the lock evidence
+used to adjudicate current runtime suitability.
 
 Runtime concurrency measurement is bounded to actual panel SQL and run-record
 DAO commits; it does not establish every future load, database growth, arbitrary
@@ -182,6 +187,74 @@ test invocation imports the mutated owner and gives 2 failures in 0.04 s.
 The actual prototype/container behavior, source correction and targeted mutation
 support this selected repair; the unmutated full-suite pass alone does not prove
 native Grafana behavior or production data preservation.
+
+### Review-directed native lock observation — 12:42 EDT
+
+Astra confirmed two evidence defects: the initial synchronization did not prove
+SQLite overlap, and the request-range attribution was wrong. Both are CLOSED
+by narrowing the preceding claims, correcting the attribution, and this bounded
+follow-up against the same unchanged corrected owner. No runtime code was added.
+
+Repeat all five stages with the owner's actual seven-day request range and a
+fresh consistent local input. During the query burst, a separate fixture-only
+native SQLite connection with immediate/no-wait locking attempts `BEGIN EXCLUSIVE`
+and immediately rolls back successes. A `database is locked` observation, before
+the sole writer has started any transaction, establishes an actual reader-held
+lock rather than inferring one from HTTP scheduling. Close that probe, then run
+the 21 actual DAO commits on the real owner's connection with its unchanged
+native busy timeout. This is one-time measurement, not a runtime lock probe,
+retry or budget. Probe timings are not offered as unperturbed performance.
+
+Native reader lock conflict observed. All 105 panel queries still succeeded;
+the burst returned the pre-write snapshot, and closed/restarted stages included
+all 21 new run records. Before those additions, every original row in every
+native-discovered table compared equal. Query burst median/max 74.2/397.4 ms;
+owner commit median/max 0.119/241.761 ms. The larger first commit is consistent
+with the real reader contention just witnessed; previous tiny maxima were not
+evidence that contention cannot occur. All observations fit the existing
+five-minute cadence and native connection budget. This limited observation
+supports the correction for the current workload, not arbitrary future load.
+
+### Independent review dispositions
+
+Astra/OpenAI reviewed the complete f26d4ea against f62a517 and actual native
+owner/consumer seams. It independently ran both tests, observed both fail when
+only the actual journal statement is changed back to WAL, verified active-reader
+conversion raises `OperationalError: database is locked`, and compared all
+original fixture records against the converted data. Original rows and
+sqlite_sequence remain equal; only 21 fixture run records were added. Its two
+confirmed evidence findings are closed above. No source correction defect was
+established. Live effect remains a separate gate.
+
+GLM-5.3/Ollama reviewed the same whole named artifact and raw owner/consumer
+files and experiment inputs, not a synopsis. Raw finder report is retained in
+`docs/reviews/sqlite-grafana-glm.md`; its claims to what was committed do not
+supersede the actual four-file diff. Individual dispositions:
+
+1. Claimed silent journal selection when an active reader blocks conversion:
+   REFUTED for the actual disk-store input. Astra's independent native fixture
+   raised `database is locked`, rather than silently returning WAL. Native
+   deployment still checks the returned mode with connections quiesced. A
+   permanent defensive guard for an unobserved silent case is not admitted.
+2. Stale README test/panel counts: CONFIRMED preexisting documentation debt,
+   closed without action on this outcome because neither the journal contract
+   nor its evidence depends on those counts. No runtime or safety defect in the
+   authorized repair is demonstrated; do not expand the increment to generic
+   README cleanup. Actual test count/evidence is reported here, with its limits.
+3. Paired-method provenance: CONFIRMED that the supplied current temporary
+   script is not the old paired generator; REFUTED that these temporary scripts
+   or raw JSON inputs were already committed. H's method, results and input
+   provenance are recorded above, including the paired prototype's different
+   connection reopen, fixture timestamps and invalid attempts. The corrected
+   owner and lock-observed follow-up, not an unversioned WAL performance claim,
+   underpin selection. No maintained experiment framework is introduced.
+
+Out-of-increment observations are raised under D, not silently repaired: Astra
+notes the existing main handler can log final run-record failure yet return OK;
+this has not been observed in the repaired workload. GLM notes the existing
+whole-project read-only mount exposes host-residue config to Grafana. Neither
+is introduced or needed by the journal correction. Operator adjudication, not
+reviewer recommendation, determines any follow-on work.
 
 ## Remaining gates
 
