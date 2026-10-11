@@ -229,7 +229,7 @@ established. Live effect remains a separate gate.
 GLM-5.3/Ollama reviewed the same whole named artifact and raw owner/consumer
 files and experiment inputs, not a synopsis. Raw finder report is retained in
 `docs/reviews/sqlite-grafana-glm.md`; its claims to what was committed do not
-supersede the actual four-file diff. Individual dispositions:
+supersede the actual four-file f26d4ea diff it reviewed. Individual dispositions:
 
 1. Claimed silent journal selection when an active reader blocks conversion:
    REFUTED for the actual disk-store input. Astra's independent native fixture
@@ -256,7 +256,97 @@ whole-project read-only mount exposes host-residue config to Grafana. Neither
 is introduced or needed by the journal correction. Operator adjudication, not
 reviewer recommendation, determines any follow-on work.
 
-## Remaining gates
+## Reviewed deployment — 12:56–13:05 EDT
 
-No live conversion or corrective deployment performed. Whole-artifact independent
-reviews, disposition, pi-Claude review and distinct live effect checks remain.
+Pi-Claude reviewed the complete 0e650d8 artifact against f62a517. Its 12:56 EDT
+response found no blocking defect and independently observed blocked conversion
+raise `database is locked`, with both an idle foreign connection and a reader
+transaction. It verified the existing owner is the sole store connection/journal
+selection path. Its observation of persistent live Grafana read connections
+confirmed that the already-planned consumer quiescence is required, not optional.
+No new guard or runtime mechanism was added.
+
+At 12:57 EDT, pi-Claude relayed Bryan's 12:56 EDT verdict verbatim:
+"I approve merge". PR #4 landed as 6fcd393. Deployment held the detection,
+calibration and TLS-renewal timers, verified their services idle, and stopped the
+confirmed native Grafana stack before fast-forwarding the production checkout.
+
+With connections quiesced, SQLite's supported online backup preserved a private
+local pre-conversion input. The existing corrected `findings.connect` converted
+the same live file. Before any new producer invocation, every original row in
+all seven native-discovered tables, including sqlite_sequence, compared equal
+against that backup. Returned journal mode was `delete`; header bytes were 1/1.
+No sidecar was deleted and no authoritative file was rebuilt or replaced.
+
+The first one-time evidence command queried a nonexistent `run_log.id` after
+conversion and row comparison, so it stopped before the service invocation.
+Inspection established the real primary key is `run_at`; the corrected command
+repeated the complete row comparison and mode/header check successfully. This
+diagnostic-method mistake changed no production code or stored records.
+
+The real installed detection service ran at 12:59:10 EDT: Result=success,
+ExecMainStatus=0, structured `pihole-watch OK queries=0 findings=0 elapsed_ms=389`.
+The persisted run count advanced from 34,329 to 34,330, with a new run and snapshot
+at 16:59:10 UTC and null run error. Zero queries is the actual acquired result,
+not a substituted freshness value or proof of nonzero traffic.
+
+After restarting the existing Grafana consumer, its actual PiHoleWatch health
+changed from HTTP 400 to HTTP 200/OK. All 21 unchanged owner panel targets
+executed through the real plugin after writer close and consumer restart:
+zero errors, 206,229 response-frame rows, maximum query 448.725 ms. TLS was
+verified through the canonical renewal service, Result=success/ExecMainStatus=0
+at 12:59:35 EDT. All three existing timers were restored active.
+
+The next ordinary timer invocation at 13:04:10 EDT also succeeded with Grafana
+running and holding its reader connections: persisted count 34,331, one acquired
+query, one emitted finding, 382 ms, null run error, and a new snapshot at
+17:04:10 UTC. All 21 actual panel queries passed again after that scheduled
+write, with 206,235 response-frame rows. This verifies a real normal producer
+cycle against the live reader, not merely a conversion-time invocation.
+
+Other native datasource health checks passed for EnviroPlus SQLite, Lexx
+Postgres and Stocks Postgres. Stocks SQLite still reports its configured file
+absent; this existing integration is outside the journal repair and was raised
+under D, not suppressed or changed. Do not describe the entire hub as green.
+
+Distinct pi-Claude deployed-effect review was requested at 13:00 EDT. Its reply
+sent at 13:04 EDT independently confirmed clean deployed master 6fcd393,
+header 1/1, read-only journal query returning delete, successful ordinary timer
+invocation with Grafana connected, restored timers and native datasource health.
+Its native datasource query read the new 17:04:10 UTC run and count 34,331 at
+17:04:32 UTC, independently confirming committed freshness across the live
+producer/consumer boundary.
+
+Pi-Claude's separate panel-request reconstruction dropped target format/time
+fields and produced empty frames plus five format errors. Its panel check is
+UNCONFIRMED, not a dashboard failure or a corroboration of the author's two
+21/21 live observations. The reconstruction failure establishes no defect in
+the unchanged actual targets; no new runtime code or review round is admitted
+without a remaining defect class. Source and distinct deployed-effect reviews
+are complete with these evidence limits; the existing Stocks SQLite observation
+remains raised outside this increment.
+
+### Implementation axiom-check
+
+| Axiom | Falsification question | Result |
+|---|---|---|
+| 1 Truth is absolute | Records replaced or owner duplicated? | CONFORMS |
+| 2 Cognition is adaptive | Curated switching or routing added? | CONFORMS |
+| 3 Antifragility is doctrine | Ordinary close/restart breaks reads? | CONFORMS |
+| 4 KISS | Unobserved-case mechanisms introduced? | CONFORMS |
+| 5 Boundaries | Conversion/query errors become success? | CONFORMS |
+| 6 Maintenance is directional | Unrelated runtime ownership expanded? | CONFORMS |
+| Preamble | Mechanism exceeds demonstrated need? | CONFORMS |
+
+Locations and executed constructions: `pihole_watch/findings.py::connect` remains
+the sole existing owner and changes only journal selection; all pre-conversion
+live rows compare equal (1). The complete runtime diff adds no selector,
+enumeration or generated routing (2). Actual native cold/open/reader-lock/writer-
+closed/restarted fixture stages and the live restarted reader execute unchanged
+owner queries successfully (3). The only runtime change repairs the observed
+HTTP 400 on this real read-only consumer; no guard, retry, service or permission
+expansion is admitted (4, Preamble). Native blocked conversion raises, baseline
+WAL queries return real errors, and no fallback changes either result (5).
+The existing connection owner, database, SQL ownership and schedules remain;
+README's superseded WAL requirement is removed (6). These conclusions are
+bounded to this artifact and the observed workload, not arbitrary future loads.
