@@ -117,10 +117,13 @@ CREATE INDEX IF NOT EXISTS idx_triage_log_source ON triage_log(source);
 
 
 def connect(db_path: str) -> sqlite3.Connection:
-    """Open a WAL-mode connection with row factory and schema applied."""
+    """Open the findings store with read-only Grafana-compatible journaling."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # Grafana mounts this live store read-only. WAL sidecars disappear between
+    # producer runs; rollback journaling keeps closed-store reads independent
+    # of those files without granting the consumer write access.
+    conn.execute("PRAGMA journal_mode=DELETE")
     conn.execute("PRAGMA foreign_keys=ON")
     init_schema(conn)
     return conn

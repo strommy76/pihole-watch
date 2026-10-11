@@ -81,4 +81,109 @@ Primary sources:
 
 ## Experiment and implementation evidence
 
-Pending. No live journal conversion or corrective deployment performed.
+### Native runtime comparison — 12:28–12:35 EDT
+
+Production source f62a517. Obtain a consistent local input with Python SQLite's
+supported `source.backup(destination)` from `file:.../findings.db?mode=ro`.
+The source connection creates/cleans SQLite's own transient coordination files
+as necessary but never writes observation records. No backup replaces live data.
+Copies, provisioning and disposable data stayed in a private task directory.
+
+Run an isolated Grafana with the actual pinned image
+`grafana/grafana@sha256:1c1bd67c54c5fcf6e759897852b5a584191bd6796e8d328a5ace457799801261`,
+UID/GID 1000, the installed signed frser-sqlite-datasource 4.0.6 mounted read-only,
+and each copy's database directory mounted read-only. Expose only an OS-assigned
+loopback port, with an experiment-only credential and no production accounts or
+state. Disable native analytics/update checks; never install another plugin.
+
+Method: generate targets from every actual owner dashboard panel. The plugin's
+installed frontend `applyTemplateVariables` assigns native backend `queryText`
+from `rawQueryText`; no owner SQL contains template variables, so use the exact
+SQL unchanged in that required API field. Send each target to `/api/ds/query`
+with the owner's six-hour range, one concurrent reader per actual target (21):
+
+1. Apply owner schema to an isolated copy; select candidate mode through native
+   SQLite and close the writer before starting the reader.
+2. Query all targets cold, then reopen the writer and repeat all targets.
+3. Concurrently query all targets and commit 21 real `findings.record_run` calls,
+   representing a write burst alongside a complete dashboard refresh. Each call
+   uses the existing DAO, supplied query count 1 and zero findings. This is not
+   a replay of every detector or triage operation.
+4. Close the writer and query all targets again; restart only the isolated
+   Grafana, read back its newly assigned loopback port, and repeat all targets.
+5. Count actual response errors and returned rows, timing individual requests
+   and DAO calls with `time.monotonic`. Never print returned private values.
+   Remove the exact disposable container including its disposable anonymous
+   state volume after each mode; do not touch the production container/volume.
+
+The first attempt stopped on stale ephemeral port after reader restart; corrected
+the method to read native port assignment again. A second attempt omitted the
+frontend's required backend field and therefore did not execute panel SQL; its
+empty frames/error counts are invalid evidence and were discarded, not reported
+as successful queries. Those method errors do not justify production code.
+
+Valid paired fixture comparison (12:32 EDT, current-sized consistent input):
+
+| Stage | WAL errors/queries | DELETE errors/queries |
+|---|---|---|
+| Cold reader | 21/21 | 0/21 |
+| Writer open, no writes | 21/21 | 0/21 |
+| Concurrent writes/reads | 0/21 | 0/21 |
+| Writer closed | 21/21 | 0/21 |
+| Reader restarted | 21/21 | 0/21 |
+
+WAL succeeds only after actual writes create coordination files in this
+observation; reopening a connection alone is insufficient. DELETE overlap query
+median/max: 77.3/390.8 ms; DAO commit median/max: 0.057/7.860 ms. WAL overlap
+query median/max: 157.0/680.7 ms, commit median/max: 0.026/6.086 ms. One paired
+observation is not statistical evidence of general throughput superiority, nor
+does a failed query's quick return measure useful performance. The fixture-only
+paired comparison used distinguishable future run timestamps; those artificial
+freshness values are not evidence of production freshness.
+
+### Actual corrected owner verification — 12:34–12:35 EDT
+
+Changed the existing `findings.connect` journal selection to DELETE; no new
+dependency, service, permission, retry, tuning value or store. Reran the isolated
+procedure importing the actual corrected owner from this branch, including the
+writer's reopen through `findings.connect`, and using current UTC timestamps for
+the fixture writes. Before any new fixture writes, compare every existing row
+in every native-discovered SQLite table, including sqlite_sequence, between
+input and converted copy: pairwise `SELECT * ORDER BY rowid`, streaming rows,
+all equal. This is a content comparison, not a digest or count-only proxy.
+
+All 105 actual panel queries succeeded: 21 each cold/open/overlap/closed/restarted.
+Cold/open bursts returned 206,193 total frame rows; each later burst 206,214,
+including the 21 newly committed fixture run records. Some time-series frames
+repeat their time values across series; these totals are response rows, not
+unique database records. Actual corrected overlap query median/max:
+62.4/405.9 ms; cold maximum 640.4 ms; restarted maximum 463.0 ms.
+Actual DAO commit median/max: 0.068/1.477 ms. These measured nominal operations
+fit the existing five-minute collection/refresh cadence with no added budget.
+No evidence from this current workload justifies a larger WAL mechanism.
+
+Runtime concurrency measurement is bounded to actual panel SQL and run-record
+DAO commits; it does not establish every future load, database growth, arbitrary
+long-held reader transaction, detector mix or power-loss outcome. SQLite retains
+transaction/recovery ownership; a read-only reader encountering unrecovered
+journal state fails until the existing writer recovers it. No synthetic success.
+
+The repository-local interpreter ran the full suite: 109 passed in 0.68 s.
+New tests directly use native SQLite and the real owner: initial and subsequent
+closed-store reads with a filesystem-read-only directory, and existing WAL
+records preserved through owner-selected mode conversion. Their expectations
+come from supplied records and the declared journal contract, not execution
+snapshots. For r, copy actual owner bytes and replace only DELETE with WAL:
+both new tests fail (read-only open and wrong retained mode). An initial mutation
+invocation imported the unmutated test project's owner through pytest's path
+precedence; that invocation is invalid evidence. The corrected isolated copied
+test invocation imports the mutated owner and gives 2 failures in 0.04 s.
+
+The actual prototype/container behavior, source correction and targeted mutation
+support this selected repair; the unmutated full-suite pass alone does not prove
+native Grafana behavior or production data preservation.
+
+## Remaining gates
+
+No live conversion or corrective deployment performed. Whole-artifact independent
+reviews, disposition, pi-Claude review and distinct live effect checks remain.
